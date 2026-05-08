@@ -177,7 +177,7 @@ def compute_vp_score(dc, dv, dh, dl, wc=None, wh=None, wl=None):
         sc += 2 if dfh < 0.03 else (1.5 if dfh < 0.08 else (0.5 if dfh < 0.15 else 0))
     return {'score': min(20, round(float(sc), 1))}
 
-def compute_composite(stage_r, rs_r, vp_r, fund_score=7.5, cat_score=1.0):
+def compute_composite(stage_r, rs_r, vp_r, fund_score=7.5, cat_score=3.0):
     raw = stage_r['score'] + rs_r['score'] + vp_r['score'] + fund_score + cat_score
     fs = stage_r.get('full_stage', 'UNKNOWN')
     cap = STAGE_CAPS.get(fs, 50)
@@ -189,6 +189,30 @@ def compute_composite(stage_r, rs_r, vp_r, fund_score=7.5, cat_score=1.0):
     if fs == '3' and bucket == 'MUST_BUY': bucket = 'NEUTRAL'
     return {'composite_score': round(float(comp), 1), 'raw_composite': round(float(raw), 1),
             'bucket': bucket, 'stage_cap_applied': comp < raw}
+
+def detect_entry(dc, dh, dl, dv, wc):
+    """Detect breakout, pullback, VCP entry patterns."""
+    if len(dc) < 50 or len(wc) < 30: return 'WAIT', ''
+    price = float(dc.iloc[-1])
+    ma30w = float(wc.rolling(30).mean().iloc[-1])
+    ma21d = float(dc.rolling(21).mean().iloc[-1])
+    ma50d = float(dc.rolling(50).mean().iloc[-1])
+    va = float(dv.rolling(50).mean().iloc[-1])
+    vr = float(dv.iloc[-1]) / va if va > 0 else 1
+    h52 = float(dh.iloc[-252:].max()) if len(dh) >= 252 else float(dh.max())
+    dh52 = (h52 - price) / h52 if h52 > 0 else 1
+    rr = (float(dh.iloc[-10:].max()) - float(dl.iloc[-10:].min())) / price if price > 0 else 0
+    vc = float(dv.iloc[-5:].mean()) / float(dv.iloc[-20:].mean()) if float(dv.iloc[-20:].mean()) > 0 else 1
+    aa = price > ma21d and price > ma50d and price > ma30w
+    if dh52 < 0.03 and vr > 1.5: return 'BUY NOW', f'Breakout! Near 52w high on {vr:.1f}x volume'
+    if aa and abs(price - ma21d)/ma21d < 0.02 and vc < 0.8: return 'BUY NOW', f'Pullback to 21d MA on low vol'
+    if aa and rr < 0.06 and vc < 0.7: return 'BUY NOW', f'VCP: Tight range + volume dry-up'
+    if aa and abs(price - ma50d)/ma50d < 0.03: return 'BUY DIPS', f'At 50d MA support'
+    if 0.03 <= dh52 < 0.08 and rr < 0.08 and aa: return 'WATCH', f'{dh52:.0%} from high, consolidating'
+    if aa and price > ma50d * 1.12: return 'WAIT', f'Extended — wait for pullback'
+    if aa: return 'WATCH', f'Uptrend. Wait for pullback to 21d/50d MA'
+    if price < ma30w: return 'AVOID', 'Below 30-week MA'
+    return 'WAIT', 'No clear pattern'
 
 # ── UNIVERSE LOADER ──
 def load_universe():
@@ -291,7 +315,6 @@ def main():
         sec_rets.setdefault(sec, []).append(ret)
 
     scores = []
-    # Also track previous scores for change detection
     prev_scores = {}
     prev = sb_query('ar_daily_scores', select='symbol,composite_score,weinstein_stage,bucket',
                     params={'order': 'score_date.desc'}, limit=800)
@@ -299,6 +322,9 @@ def main():
         if p['symbol'] not in prev_scores:
             prev_scores[p['symbol']] = p
 
+    # Phase 1: Score all stocks with technical factors only
+    print("  Phase 1: Technical scoring...")
+    tech_scores = {}
     for sym in weekly:
         if sym not in daily: continue
         try:
@@ -307,13 +333,126 @@ def main():
             stage = classify_stage(w['Close'], w['Volume'])
             rs = compute_rs_score(w['Close'], nifty_close, univ_rets, sec_rets.get(sec, []))
             vp = compute_vp_score(d['Close'], d['Volume'], d['High'], d['Low'], w['Close'], w['High'], w['Low'])
-            comp = compute_composite(stage, rs, vp)
+            tech_scores[sym] = {'stage': stage, 'rs': rs, 'vp': vp, 'sec': sec}
+        except: pass
+    print(f"  Tech scored: {len(tech_scores)}")
+
+    # Phase 2: Fetch real fundamentals for top ~200 stocks (Can Buy candidates + stage changes)
+    # This avoids hammering yfinance for all 750 stocks
+    print("  Phase 2: Fetching fundamentals for top stocks...")
+    fund_cache = {}
+    
+    # Prioritize: stocks likely to be Can Buy or better
+    priority_syms = []
+    for sym, ts in tech_scores.items():
+        raw = ts['stage']['score'] + ts['rs']['score'] + ts['vp']['score']
+        if raw >= 40 or ts['stage']['full_stage'] in ('2A', '2B'):  # Likely to score well
+            priority_syms.append(sym)
+    priority_syms = priority_syms[:200]  # Cap at 200 to stay within time limits
+    
+    for i, sym in enumerate(priority_syms):
+        try:
+            tk = yf.Ticker(f"{sym}.NS")
+            info = tk.info
+            sc = 0.0
+            eg = info.get('earningsGrowth')
+            if eg is not None:
+                if eg > 0.40: sc += 4
+                elif eg > 0.25: sc += 3
+                elif eg > 0.10: sc += 2
+                elif eg > 0: sc += 1
+            else: sc += 1
+            rg = info.get('revenueGrowth')
+            if rg is not None:
+                if rg > 0.25: sc += 3
+                elif rg > 0.15: sc += 2
+                elif rg > 0.05: sc += 1
+            else: sc += 1
+            roe = info.get('returnOnEquity')
+            if roe is not None:
+                if roe > 0.20: sc += 2
+                elif roe > 0.12: sc += 1
+            else: sc += 0.5
+            om = info.get('operatingMargins')
+            if om is not None:
+                if om > 0.20: sc += 2
+                elif om > 0.10: sc += 1.5
+                elif om > 0.05: sc += 1
+            else: sc += 0.5
+            pe = info.get('trailingPE')
+            if pe and pe > 0:
+                if pe < 15: sc += 2
+                elif pe < 30: sc += 1.5
+                elif pe < 60: sc += 1
+                elif pe < 100: sc += 0.5
+            else: sc += 0.5
+            fund_cache[sym] = min(15, round(sc, 1))
+        except:
+            fund_cache[sym] = 7.5
+        if (i+1) % 50 == 0:
+            print(f"    Fundamentals: {i+1}/{len(priority_syms)}")
+            time.sleep(0.5)
+    print(f"  Fundamentals fetched: {len(fund_cache)}")
+
+    # Phase 3: News sentiment for top 100 stocks
+    print("  Phase 3: News sentiment for top stocks...")
+    cat_cache = {}
+    top_100_syms = priority_syms[:100]
+    for sym in top_100_syms:
+        try:
+            url = f"https://news.google.com/rss/search?q={sym}+NSE+stock&hl=en-IN&gl=IN&ceid=IN:en"
+            r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
+            if r.status_code == 200:
+                txt = r.text.lower()
+                cnt = txt.count('<item>')
+                pos_w = ['surge','rally','profit','growth','record','strong','upgrade','buy','bullish','breakout','bonus','dividend']
+                neg_w = ['fall','crash','loss','decline','weak','downgrade','sell','bearish','fraud','scam','probe','penalty']
+                pos = sum(txt.count(w) for w in pos_w)
+                neg = sum(txt.count(w) for w in neg_w)
+                total = pos + neg
+                sent = (pos - neg) / max(total, 1)
+                sc = 0
+                if sent > 0.3 and cnt >= 5: sc = 7
+                elif sent > 0.1: sc = 5
+                elif sent > -0.1: sc = 3
+                else: sc = 1
+                if sent < -0.2: sc = max(0, sc - 2)
+                cat_cache[sym] = {'score': min(10, sc), 'sentiment': round(sent, 2), 'count': cnt}
+            else:
+                cat_cache[sym] = {'score': 3, 'sentiment': 0, 'count': 0}
+        except:
+            cat_cache[sym] = {'score': 3, 'sentiment': 0, 'count': 0}
+    print(f"  News scored: {len(cat_cache)}")
+
+    # Phase 4: Assemble final scores with entry signals
+    print("  Phase 4: Assembling final scores + entry signals...")
+    for sym, ts in tech_scores.items():
+        try:
+            d = daily[sym]
+            w = weekly[sym]
+            stage, rs, vp = ts['stage'], ts['rs'], ts['vp']
+            
+            fs = fund_cache.get(sym, 7.5)
+            cs_data = cat_cache.get(sym, {'score': 3, 'sentiment': 0, 'count': 0})
+            cs = cs_data['score']
+            
+            comp = compute_composite(stage, rs, vp, fs, cs)
+            
+            # Entry signal detection for Stage 2 stocks
+            entry_sig, entry_det = 'N/A', ''
+            if stage['full_stage'] in ('2A', '2B', '1B'):
+                entry_sig, entry_det = detect_entry(d['Close'], d['High'], d['Low'], d['Volume'], w['Close'])
+
+            # Action label for easy reading
+            action_map = {
+                'MUST_BUY': 'Strong Buy', 'CAN_BUY': 'Buy on Setup',
+                'NEUTRAL': 'Hold / No Action', 'AVOID': 'Do Not Buy', 'SELL': 'Exit Position'
+            }
             
             price = float(d['Close'].iloc[-1])
             prev_price = float(d['Close'].iloc[-2]) if len(d['Close']) > 1 else price
             chg = (price - prev_price) / prev_price * 100
 
-            # Score change vs previous day
             prev_sc = prev_scores.get(sym, {}).get('composite_score')
             score_chg = round(comp['composite_score'] - float(prev_sc), 1) if prev_sc else None
             prev_stage = prev_scores.get(sym, {}).get('weinstein_stage')
@@ -325,7 +464,7 @@ def main():
                 'bucket': comp['bucket'],
                 'stage_score': stage['score'], 'rs_score': rs['score'],
                 'volume_price_score': vp['score'],
-                'fundamental_score': 7.5, 'catalyst_score': 1.0,
+                'fundamental_score': fs, 'catalyst_score': cs,
                 'weinstein_stage': stage['full_stage'],
                 'rs_percentile': rs['rs_percentile'], 'sector_percentile': rs['sector_percentile'],
                 'rs_new_high': bool(rs['rs_new_high']),
@@ -335,9 +474,14 @@ def main():
                 'low_52w': round(float(d['Low'].min()), 2),
                 'price_vs_ma': round(stage.get('price_vs_ma', 0) * 100, 2),
                 'ma_slope': stage.get('ma_slope', 0),
-                'data_quality': 'full',
+                'data_quality': 'full' if sym in fund_cache else 'tech_only',
                 'score_change': score_chg,
                 'stage_changed': stage_changed,
+                'entry_signal': entry_sig,
+                'entry_detail': entry_det[:200] if entry_det else '',
+                'news_sentiment': cs_data.get('sentiment', 0),
+                'news_count': cs_data.get('count', 0),
+                'action_label': action_map.get(comp['bucket'], 'No Action'),
             })
         except: pass
 

@@ -188,32 +188,39 @@ with st.expander("ℹ️ Quick Guide — What do the columns mean?", expanded=Fa
 
 # ── MAIN TABLE ──
 if not fdf.empty:
-    dcols = [c for c in ['symbol', 'composite_score', 'score_change', 'bucket', 'weinstein_stage',
-             'price', 'price_change_pct', 'rs_percentile', 'sector_percentile',
-             'stage_score', 'rs_score', 'volume_price_score',
-             'rs_new_high', 'stage_cap_applied', 'stage_changed'] if c in fdf.columns]
+    dcols = [c for c in ['symbol', 'composite_score', 'score_change', 'action_label', 'weinstein_stage',
+             'entry_signal', 'price', 'price_change_pct', 'rs_percentile', 'sector_percentile',
+             'stage_score', 'rs_score', 'volume_price_score', 'fundamental_score', 'catalyst_score',
+             'rs_new_high', 'stage_cap_applied', 'entry_detail'] if c in fdf.columns]
     show = fdf[dcols].copy()
-    ren = {'symbol': 'Symbol', 'composite_score': 'Score', 'score_change': 'Δ Score',
-           'bucket': 'Bucket', 'weinstein_stage': 'Stage', 'price': 'Price',
-           'price_change_pct': 'Chg%', 'rs_percentile': 'RS Pctl',
+    ren = {'symbol': 'Symbol', 'composite_score': 'Score', 'score_change': 'Δ',
+           'action_label': 'Action', 'weinstein_stage': 'Stage', 'entry_signal': 'Entry Signal',
+           'price': 'Price', 'price_change_pct': 'Chg%', 'rs_percentile': 'RS Pctl',
            'sector_percentile': 'Sec Pctl', 'stage_score': 'Stg',
            'rs_score': 'RS', 'volume_price_score': 'VP',
-           'rs_new_high': 'RS★', 'stage_cap_applied': 'Capped', 'stage_changed': 'Stg Chg'}
+           'fundamental_score': 'Fund', 'catalyst_score': 'Cat',
+           'rs_new_high': 'RS★', 'stage_cap_applied': 'Capped',
+           'entry_detail': 'Entry Detail'}
     show = show.rename(columns=ren)
 
     ccfg = {
-        "Score": st.column_config.NumberColumn(format="%.1f", help="Composite score 0-100. Higher = stronger stock. 60+ = trade worthy"),
-        "Δ Score": st.column_config.NumberColumn(format="%+.1f", help="Change vs previous day. Large + = improving momentum, Large - = deteriorating"),
+        "Score": st.column_config.NumberColumn(format="%.1f", help="Composite score 0-100. Higher = stronger. 60+ = trade worthy"),
+        "Δ": st.column_config.NumberColumn(format="%+.1f", help="Score change vs previous day"),
+        "Action": st.column_config.TextColumn(help="What to do: Strong Buy → Exit Position"),
+        "Stage": st.column_config.TextColumn(help="Weinstein stage. 2A=buy zone, 4=decline"),
+        "Entry Signal": st.column_config.TextColumn(help="BUY NOW=setup ready, WATCH=building, WAIT=not yet, AVOID=stay away"),
         "Price": st.column_config.NumberColumn(format="₹%.2f"),
-        "Chg%": st.column_config.NumberColumn(format="%.2f%%", help="Daily price change"),
-        "RS Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank among all stocks by 52-week return. >70 = strong, >90 = elite leader"),
-        "Sec Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank within its own sector. High RS + High Sec = true sector leader"),
-        "Stg": st.column_config.NumberColumn(format="%.1f", help="Trend/Stage score (0-30). Based on Weinstein 30-week MA analysis"),
-        "RS": st.column_config.NumberColumn(format="%.1f", help="Relative Strength score (0-25). Measures outperformance vs Nifty 50"),
-        "VP": st.column_config.NumberColumn(format="%.1f", help="Volume-Price score (0-20). O'Neil/Minervini accumulation & base quality"),
-        "RS★": st.column_config.CheckboxColumn(help="⭐ = RS line at 52-week high. Very bullish — stock is at peak relative performance"),
-        "Capped": st.column_config.CheckboxColumn(help="Score was capped by Stage gate. Stage 4 max=20, Stage 3 max=40"),
-        "Stg Chg": st.column_config.CheckboxColumn(help="Stage changed vs previous day. Into Stage 2 = buy signal, Into Stage 4 = sell signal"),
+        "Chg%": st.column_config.NumberColumn(format="%.2f%%"),
+        "RS Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank among all stocks. >70=strong, >90=elite"),
+        "Sec Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank within sector. High=sector leader"),
+        "Stg": st.column_config.NumberColumn(format="%.1f", help="Trend score (0-30)"),
+        "RS": st.column_config.NumberColumn(format="%.1f", help="Relative Strength (0-25)"),
+        "VP": st.column_config.NumberColumn(format="%.1f", help="Volume-Price patterns (0-20)"),
+        "Fund": st.column_config.NumberColumn(format="%.1f", help="Fundamentals: EPS, revenue, ROE, margins (0-15)"),
+        "Cat": st.column_config.NumberColumn(format="%.1f", help="Catalyst: news sentiment, coverage (0-10)"),
+        "RS★": st.column_config.CheckboxColumn(help="RS at 52-week high = very bullish"),
+        "Capped": st.column_config.CheckboxColumn(help="Score limited by Stage gate"),
+        "Entry Detail": st.column_config.TextColumn(help="Specific entry setup description", width="medium"),
     }
     st.dataframe(show, use_container_width=True, height=600, column_config=ccfg, hide_index=True)
 
@@ -279,4 +286,15 @@ with c2:
         fig.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20), plot_bgcolor='white')
         st.plotly_chart(fig, use_container_width=True)
 
-st.caption(f"AlphaRadar v2.1 · Score date: {score_date} · Stage Hard Gate active · Auto-updates daily at 4:45 PM IST")
+st.caption(f"AlphaRadar v3.0 · Score date: {score_date} · Auto-updates daily at 4:45 PM IST")
+
+st.divider()
+st.markdown("""
+<div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px 16px; margin-top: 8px;">
+<p style="font-size: 11px; color: #991b1b; margin: 0; line-height: 1.5;">
+<strong>⚠️ DISCLAIMER:</strong> AlphaRadar is an <strong>educational and research tool only</strong>. It is NOT a SEBI-registered Research Analyst, Investment Adviser, or Portfolio Manager. No content on this platform constitutes a recommendation, solicitation, or offer to buy or sell any securities. All scores, ratings, and classifications are algorithmically generated based on publicly available data and should NOT be construed as investment advice. 
+<br><br>
+<strong>Trading and investing in securities involves substantial risk of loss.</strong> Past performance of any scoring model does not guarantee future results. Users must conduct their own due diligence and consult a SEBI-registered investment adviser before making any investment decisions. The creators of this tool bear no liability for any financial losses incurred. By using this tool, you acknowledge that you are solely responsible for your investment decisions.
+</p>
+</div>
+""", unsafe_allow_html=True)
