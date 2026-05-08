@@ -108,6 +108,39 @@ for i, (bk, (em, lb, cl)) in enumerate(BCFG.items()):
 
 st.divider()
 
+# ── TODAY'S ACTIONABLE HIGHLIGHTS ──
+if 'stage_changed' in df.columns and 'weinstein_stage' in df.columns:
+    stage_changed = df[df.get('stage_changed', False) == True] if 'stage_changed' in df.columns else pd.DataFrame()
+    new_stage2 = stage_changed[stage_changed['weinstein_stage'].isin(['2A', '2B'])] if not stage_changed.empty else pd.DataFrame()
+    new_stage4 = stage_changed[stage_changed['weinstein_stage'] == '4'] if not stage_changed.empty else pd.DataFrame()
+    top_rs_stars = df[(df.get('rs_new_high', False) == True) & (df['weinstein_stage'].isin(['2A', '2B']))].sort_values('composite_score', ascending=False).head(5) if 'rs_new_high' in df.columns else pd.DataFrame()
+    
+    if not new_stage2.empty or not new_stage4.empty or not top_rs_stars.empty:
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            if not new_stage2.empty:
+                st.success(f"🟢 **{len(new_stage2)} New Buy Signals** (entered Stage 2)")
+                for _, r in new_stage2.head(5).iterrows():
+                    st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%")
+            else:
+                st.info("No new Stage 2 entries today")
+        with h2:
+            if not new_stage4.empty:
+                st.error(f"🔴 **{len(new_stage4)} Sell Signals** (entered Stage 4)")
+                for _, r in new_stage4.head(5).iterrows():
+                    st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f}")
+            else:
+                st.info("No new Stage 4 entries today")
+        with h3:
+            if not top_rs_stars.empty:
+                st.markdown(f"⭐ **Top Stage 2 + RS New High** (strongest leaders)")
+                for _, r in top_rs_stars.iterrows():
+                    st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%")
+            else:
+                st.info("No Stage 2 RS new highs today")
+
+st.divider()
+
 # ── FILTERS ──
 fc1, fc2, fc3, fc4, fc5 = st.columns([2.5, 1, 1, 1, 1])
 with fc1:
@@ -136,6 +169,23 @@ if sc in fdf.columns: fdf = fdf.sort_values(sc, ascending=sa)
 
 st.caption(f"Showing {len(fdf)} of {len(df)} stocks · Data: {score_date}")
 
+# Quick legend
+with st.expander("ℹ️ Quick Guide — What do the columns mean?", expanded=False):
+    st.markdown("""
+    | Column | Meaning | Good Value |
+    |--------|---------|------------|
+    | **Score** | Overall conviction (0-100) | 60+ for trades |
+    | **Stage** | Weinstein cycle stage | **2A** = buy zone |
+    | **RS Pctl** | Strength rank vs all stocks | >70% = strong |
+    | **Sec Pctl** | Strength rank within sector | >70% = sector leader |
+    | **Stg/RS/VP** | Sub-scores: Trend, Strength, Volume | Higher = better |
+    | **RS★** | RS at 52-week high | ⭐ = very bullish |
+    | **Capped** | Score limited by Stage gate | Stage 4 max = 20 |
+    
+    📖 **Full guide:** See the "How to Use" page in the sidebar
+    """)
+
+
 # ── MAIN TABLE ──
 if not fdf.empty:
     dcols = [c for c in ['symbol', 'composite_score', 'score_change', 'bucket', 'weinstein_stage',
@@ -152,17 +202,18 @@ if not fdf.empty:
     show = show.rename(columns=ren)
 
     ccfg = {
-        "Score": st.column_config.NumberColumn(format="%.1f"),
-        "Δ Score": st.column_config.NumberColumn(format="%+.1f"),
+        "Score": st.column_config.NumberColumn(format="%.1f", help="Composite score 0-100. Higher = stronger stock. 60+ = trade worthy"),
+        "Δ Score": st.column_config.NumberColumn(format="%+.1f", help="Change vs previous day. Large + = improving momentum, Large - = deteriorating"),
         "Price": st.column_config.NumberColumn(format="₹%.2f"),
-        "Chg%": st.column_config.NumberColumn(format="%.2f%%"),
-        "RS Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
-        "Sec Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
-        "Stg": st.column_config.NumberColumn(format="%.1f"),
-        "RS": st.column_config.NumberColumn(format="%.1f"),
-        "VP": st.column_config.NumberColumn(format="%.1f"),
-        "RS★": st.column_config.CheckboxColumn(), "Capped": st.column_config.CheckboxColumn(),
-        "Stg Chg": st.column_config.CheckboxColumn(),
+        "Chg%": st.column_config.NumberColumn(format="%.2f%%", help="Daily price change"),
+        "RS Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank among all stocks by 52-week return. >70 = strong, >90 = elite leader"),
+        "Sec Pctl": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f", help="Rank within its own sector. High RS + High Sec = true sector leader"),
+        "Stg": st.column_config.NumberColumn(format="%.1f", help="Trend/Stage score (0-30). Based on Weinstein 30-week MA analysis"),
+        "RS": st.column_config.NumberColumn(format="%.1f", help="Relative Strength score (0-25). Measures outperformance vs Nifty 50"),
+        "VP": st.column_config.NumberColumn(format="%.1f", help="Volume-Price score (0-20). O'Neil/Minervini accumulation & base quality"),
+        "RS★": st.column_config.CheckboxColumn(help="⭐ = RS line at 52-week high. Very bullish — stock is at peak relative performance"),
+        "Capped": st.column_config.CheckboxColumn(help="Score was capped by Stage gate. Stage 4 max=20, Stage 3 max=40"),
+        "Stg Chg": st.column_config.CheckboxColumn(help="Stage changed vs previous day. Into Stage 2 = buy signal, Into Stage 4 = sell signal"),
     }
     st.dataframe(show, use_container_width=True, height=600, column_config=ccfg, hide_index=True)
 

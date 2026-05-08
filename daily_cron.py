@@ -354,44 +354,76 @@ def main():
 
     elapsed = (datetime.now() - start).total_seconds() / 60
 
-    # Alerts: stage changes, big score moves
-    alerts = []
+    # ── BUILD ACTIONABLE TELEGRAM ALERTS ──
     stage_changes = [s for s in scores if s.get('stage_changed')]
     big_movers = [s for s in scores if s.get('score_change') and abs(s['score_change']) >= 10]
-    
+
+    # Categorize stage changes by what ACTION they imply
+    new_buys = []       # Moved INTO Stage 2 (buy zone)
+    exits = []          # Moved OUT of Stage 2 into 3/4 (sell/exit zone)
+    improving = []      # Stage 1A→1B (getting ready)
+    deteriorating = []  # Moving toward Stage 4
+
     for s in stage_changes:
         prev_stg = prev_scores.get(s['symbol'], {}).get('weinstein_stage', '?')
-        alerts.append(f"🔄 {s['symbol']}: Stage {prev_stg} → {s['weinstein_stage']} (Score: {s['composite_score']})")
+        curr_stg = s['weinstein_stage']
 
-    # Telegram summary
+        if curr_stg in ('2A', '2B') and prev_stg not in ('2A', '2B'):
+            new_buys.append(s)
+        elif curr_stg in ('3', '4') and prev_stg in ('2A', '2B'):
+            exits.append(s)
+        elif curr_stg == '1B' and prev_stg == '1A':
+            improving.append(s)
+        elif curr_stg == '4' and prev_stg != '4':
+            deteriorating.append(s)
+
     top = sorted(scores, key=lambda x: -x['composite_score'])[:5]
-    msg = f"""🎯 <b>AlphaRadar — {today}</b>
 
-📊 <b>{len(scores)}</b> stocks scored in {elapsed:.1f}min
+    # ── MESSAGE 1: Daily Summary (concise) ──
+    msg1 = f"""🎯 <b>AlphaRadar — {today}</b>
+{len(scores)} stocks scored
 
-🟢 Must Buy: {bc.get('MUST_BUY', 0)}
-🔵 Can Buy: {bc.get('CAN_BUY', 0)}
-⚪ Neutral: {bc.get('NEUTRAL', 0)}
-🟡 Avoid: {bc.get('AVOID', 0)}
-🔴 Sell: {bc.get('SELL', 0)}
+🟢 Must Buy: {bc.get('MUST_BUY', 0)} | 🔵 Can Buy: {bc.get('CAN_BUY', 0)}
+⚪ Neutral: {bc.get('NEUTRAL', 0)} | 🟡 Avoid: {bc.get('AVOID', 0)} | 🔴 Sell: {bc.get('SELL', 0)}
 
-📈 <b>Top 5:</b>
+<b>Top 5 (highest conviction):</b>
 """
     for t in top:
         chg_str = f" ({t.get('score_change',0):+.1f})" if t.get('score_change') else ""
-        msg += f"  {t['symbol']}: {t['composite_score']:.1f}{chg_str} | {t['weinstein_stage']} | RS {t['rs_percentile']:.0f}%\n"
+        msg1 += f"▸ <b>{t['symbol']}</b> {t['composite_score']:.0f}{chg_str} · ₹{t['price']:.0f} · RS {t['rs_percentile']:.0f}%\n"
 
-    if stage_changes:
-        msg += f"\n🔄 <b>{len(stage_changes)} Stage Changes:</b>\n"
-        for a in alerts[:10]:
-            msg += f"  {a}\n"
+    msg1 += f"\n🔗 https://alpharadar.streamlit.app"
+    send_telegram(msg1)
 
-    if big_movers:
-        msg += f"\n⚡ <b>{len(big_movers)} Big Movers (±10pts):</b>\n"
-        for s in sorted(big_movers, key=lambda x: -abs(x['score_change']))[:5]:
-            msg += f"  {s['symbol']}: {s['score_change']:+.1f} → {s['composite_score']:.1f}\n"
+    # ── MESSAGE 2: Action Alerts (only if there are actionable events) ──
+    if new_buys or exits:
+        msg2 = f"📢 <b>ACTION REQUIRED — {today}</b>\n"
 
-    send_telegram(msg)
+        if new_buys:
+            msg2 += f"\n🟢 <b>NEW BUY SIGNALS ({len(new_buys)}):</b>\n"
+            msg2 += "<i>These stocks just entered Stage 2 (uptrend confirmed). Consider adding to watchlist or buying on pullback.</i>\n\n"
+            for s in sorted(new_buys, key=lambda x: -x['composite_score']):
+                prev_stg = prev_scores.get(s['symbol'], {}).get('weinstein_stage', '?')
+                msg2 += f"▸ <b>{s['symbol']}</b> Score {s['composite_score']:.0f} · ₹{s['price']:.0f}\n"
+                msg2 += f"  Stage {prev_stg}→{s['weinstein_stage']} · RS {s['rs_percentile']:.0f}%\n\n"
+
+        if exits:
+            msg2 += f"\n🔴 <b>EXIT SIGNALS ({len(exits)}):</b>\n"
+            msg2 += "<i>These stocks left Stage 2 and entered distribution/decline. If you hold any, consider exiting.</i>\n\n"
+            for s in sorted(exits, key=lambda x: x['composite_score']):
+                prev_stg = prev_scores.get(s['symbol'], {}).get('weinstein_stage', '?')
+                msg2 += f"▸ <b>{s['symbol']}</b> Score {s['composite_score']:.0f} · ₹{s['price']:.0f}\n"
+                msg2 += f"  Stage {prev_stg}→{s['weinstein_stage']} · RS {s['rs_percentile']:.0f}%\n\n"
+
+        send_telegram(msg2)
+
+    # ── MESSAGE 3: Watchlist (improving stocks, only if any) ──
+    if improving:
+        msg3 = f"👀 <b>WATCHLIST — {today}</b>\n"
+        msg3 += f"<i>{len(improving)} stocks moved from Stage 1A (early basing) to 1B (late basing). These are building bases and may break out into Stage 2 soon. Not buy signals yet — watch for breakout above the 30-week moving average.</i>\n\n"
+        for s in sorted(improving, key=lambda x: -x['composite_score'])[:8]:
+            msg3 += f"▸ <b>{s['symbol']}</b> Score {s['composite_score']:.0f} · ₹{s['price']:.0f} · RS {s['rs_percentile']:.0f}%\n"
+        send_telegram(msg3)
     print(f"\n✅ Complete! {len(scores)} stocks, {elapsed:.1f} min")
 
 if __name__ == '__main__':
