@@ -1,0 +1,30 @@
+name: AlphaRadar Daily Score
+
+on:
+  schedule:
+    # 4:45 PM IST = 11:15 UTC (post market close + buffer)
+    - cron: '15 11 * * 1-5'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy scipy requests
+      
+      - name: Run daily scoring
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python daily_cron.py

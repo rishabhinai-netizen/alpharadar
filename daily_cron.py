@@ -1,0 +1,398 @@
+"""
+AlphaRadar Daily Cron — Runs via GitHub Actions
+================================================
+No Streamlit dependency. Standalone scoring script.
+Fetches data, scores all stocks, writes to Supabase, sends Telegram.
+"""
+import os
+import csv
+import io
+import json
+import time
+import requests
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
+from collections import Counter
+from scipy.stats import percentileofscore, linregress
+
+# ── CONFIG ──
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://aiebaqvclyzxajigvkfd.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpZWJhcXZjbHl6eGFqaWd2a2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5NTg1MDQsImV4cCI6MjA5MDUzNDUwNH0.m_WLKdaKwEw82RRepHYhXp3tg-g0pwMiDKM2S7Y7XdY")
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8347009897:AAEFlJxNtRbWL7_grWDtQUludo_LCbhNgck")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "705724053")
+BENCHMARK = "^NSEI"
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "resolution=merge-duplicates,return=minimal"
+}
+
+STAGE_CAPS = {'2A': 100, '2B': 90, '1B': 70, '1A': 55, '3': 40, '4': 20}
+BUCKETS_RANGES = {'MUST_BUY': (80, 100), 'CAN_BUY': (60, 79), 'NEUTRAL': (40, 59), 'AVOID': (20, 39), 'SELL': (0, 19)}
+
+INDEX_URLS = {
+    'total_market': 'https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv',
+    'nifty50': 'https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv',
+    'midcap150': 'https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv',
+    'smallcap250': 'https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv',
+    'microcap250': 'https://www.niftyindices.com/IndexConstituent/ind_niftymicrocap250_list.csv',
+}
+
+# ── SUPABASE HELPERS ──
+def sb_upsert(table, data, batch_size=50):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    total = 0
+    for i in range(0, len(data), batch_size):
+        batch = data[i:i+batch_size]
+        clean = []
+        for row in batch:
+            cr = {}
+            for k, v in row.items():
+                if isinstance(v, (np.bool_,)): cr[k] = bool(v)
+                elif isinstance(v, (np.integer,)): cr[k] = int(v)
+                elif isinstance(v, (np.floating,)): cr[k] = float(v) if not np.isnan(v) else None
+                elif isinstance(v, float) and np.isnan(v): cr[k] = None
+                else: cr[k] = v
+            clean.append(cr)
+        r = requests.post(url, headers=HEADERS, json=clean)
+        if r.status_code in (200, 201): total += len(clean)
+        else: print(f"  ⚠ Upsert error: {r.status_code} - {r.text[:200]}")
+    return total
+
+def sb_query(table, select="*", params=None, limit=1000):
+    url = f"{SUPABASE_URL}/rest/v1/{table}?select={select}&limit={limit}"
+    if params:
+        url += "&" + "&".join(f"{k}={v}" for k, v in params.items())
+    h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    r = requests.get(url, headers=h)
+    return r.json() if r.status_code == 200 else []
+
+def send_telegram(msg):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                     data={"chat_id": TG_CHAT, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print(f"  Telegram error: {e}")
+
+# ── SCORING ENGINE (inline for standalone execution) ──
+def classify_stage(wc, wv=None):
+    if len(wc) < 35:
+        return {'full_stage': 'UNKNOWN', 'score': 0, 'price_vs_ma': 0, 'ma_slope': 0, 'ma_value': 0}
+    ma30 = wc.rolling(30).mean()
+    price, ma_now = float(wc.iloc[-1]), float(ma30.iloc[-1])
+    if np.isnan(ma_now) or ma_now == 0:
+        return {'full_stage': 'UNKNOWN', 'score': 0, 'price_vs_ma': 0, 'ma_slope': 0, 'ma_value': 0}
+    pvm = (price - ma_now) / ma_now
+    s5 = float((ma30.iloc[-1] - ma30.iloc[-6]) / ma30.iloc[-6]) if len(ma30.dropna()) >= 6 else 0
+    s10 = float((ma30.iloc[-1] - ma30.iloc[-11]) / ma30.iloc[-11]) if len(ma30.dropna()) >= 11 else 0
+    vt = 1.0
+    if wv is not None and len(wv) >= 13:
+        rv, pv = wv.iloc[-4:].mean(), wv.iloc[-13:-4].mean()
+        if pv > 0: vt = rv / pv
+    wr = s10 > 0.003 if len(ma30.dropna()) >= 15 else False
+    if s5 > 0.003 and pvm > 0.02:
+        if pvm > 0.20: stg, sc = '2B', max(20, min(27, 25 - min(5, (pvm - 0.20) * 30)))
+        else:
+            fb = 2 if s10 < 0.003 else 0
+            sc = min(30, 24 + fb + min(3, s5 * 500) + (min(2, max(0, (vt-1)*5)) if vt > 1 else 0))
+            stg = '2A'
+    elif s5 < -0.003 and pvm < -0.02:
+        stg, sc = '4', max(0, 3 - min(3, abs(pvm) * 10))
+    elif abs(s5) <= 0.0045 and wr and pvm > -0.05:
+        stg, sc = '3', (4 if pvm < 0 else 7)
+    else:
+        if (s10 < -0.003 and s5 > -0.003) and pvm > -0.05:
+            pt = False
+            if len(wc) >= 20:
+                rr = (wc.iloc[-8:].max() - wc.iloc[-8:].min()) / ma_now
+                orr = (wc.iloc[-20:-8].max() - wc.iloc[-20:-8].min()) / ma_now
+                pt = rr < orr * 0.7
+            if pt or pvm > 0: stg, sc = '1B', min(19, 15 + (2 if pvm > 0 else 0))
+            else: stg, sc = '1B', 13
+        else: stg, sc = '1A', max(8, min(14, 10 + (2 if abs(pvm) < 0.05 else 0)))
+    return {'full_stage': stg, 'score': round(float(sc), 1), 'price_vs_ma': round(float(pvm), 4),
+            'ma_slope': round(float(s5), 6), 'ma_value': round(float(ma_now), 2)}
+
+def compute_rs_score(sw, bw, ur=None, sr=None):
+    ml = min(len(sw), len(bw))
+    if ml < 52: return {'score': 0, 'rs_percentile': 0, 'sector_percentile': 50, 'rs_new_high': False}
+    s, b = sw.iloc[-ml:].values, bw.iloc[-ml:].values
+    sc = 0.0
+    rs = s / b; rs = rs / rs[0]
+    rma = pd.Series(rs).rolling(min(52, len(rs)-1)).mean().values
+    rvma = (rs[-1] - rma[-1]) / rma[-1] if (not np.isnan(rma[-1]) and rma[-1] > 0) else 0
+    sc += min(4, rvma * 40) if rs[-1] > rma[-1] else max(0, 2 + rvma * 20)
+    s52r = (s[-1] / s[-52] - 1) if len(s) >= 52 else 0
+    rp = percentileofscore(ur, s52r) if ur and len(ur) > 10 else 50
+    sc += (rp / 100) * 8
+    lk = min(52, len(rs))
+    rnh = bool(rs[-1] >= np.nanmax(rs[-lk:]) * 0.97)
+    sc += 5 if rnh else (2 if rs[-1] >= np.nanmax(rs[-lk:]) * 0.90 else 0)
+    tw = min(10, len(rs)-1)
+    if tw >= 5:
+        try:
+            sn = linregress(np.arange(tw), rs[-tw:]).slope / np.mean(rs[-tw:]) * 100
+            sc += min(5, sn * 5) if sn > 0 else max(0, 2 + sn * 3)
+        except: pass
+    sp = percentileofscore(sr, s52r) if sr and len(sr) > 5 else 50
+    sc += 3 if sp > 80 else (2 if sp > 60 else (1 if sp > 40 else 0))
+    return {'score': min(25, round(float(sc), 1)), 'rs_percentile': round(float(rp), 1),
+            'sector_percentile': round(float(sp), 1), 'rs_new_high': rnh}
+
+def compute_vp_score(dc, dv, dh, dl, wc=None, wh=None, wl=None):
+    if len(dc) < 20: return {'score': 0}
+    sc = 0.0; n = len(dc); cc = dc.pct_change(); va = dv.rolling(50).mean()
+    lb = min(50, n); ud = dd = 0
+    for i in range(-lb, 0):
+        try:
+            if pd.isna(cc.iloc[i]) or pd.isna(va.iloc[i]) or va.iloc[i] == 0: continue
+            if cc.iloc[i] > 0 and dv.iloc[i] > va.iloc[i]: ud += 1
+            elif cc.iloc[i] < 0 and dv.iloc[i] > va.iloc[i]: dd += 1
+        except: pass
+    t = ud + dd
+    if t > 0: sc += min(5, (ud/t) * 7)
+    pb = []
+    for i in range(-min(20, n), 0):
+        try:
+            if cc.iloc[i] < -0.005 and va.iloc[i] > 0: pb.append(dv.iloc[i] / va.iloc[i])
+        except: pass
+    if pb:
+        apv = np.mean(pb)
+        sc += 4 if apv < 0.5 else (3 if apv < 0.7 else (1.5 if apv < 0.9 else 0))
+    if wc is not None and len(wc) >= 8:
+        rw = wc.iloc[-6:]; wr = (rw.max() - rw.min()) / rw.mean()
+        sc += 3 if wr < 0.04 else (2 if wr < 0.07 else (1 if wr < 0.10 else 0))
+    if wc is not None and wh is not None and len(wc) >= 12:
+        pk = wh.iloc[-min(52, len(wc)):].max()
+        if pk > 0:
+            dp = (pk - wc.iloc[-1]) / pk
+            sc += 4 if 0.05 <= dp < 0.15 else (3 if dp < 0.25 else (2 if dp < 0.35 else (2 if dp < 0.05 else 0.5)))
+    if len(dh) >= 50:
+        h52 = dh.iloc[-252:].max() if len(dh) >= 252 else dh.max()
+        dfh = (h52 - dc.iloc[-1]) / h52 if h52 > 0 else 1
+        sc += 2 if dfh < 0.03 else (1.5 if dfh < 0.08 else (0.5 if dfh < 0.15 else 0))
+    return {'score': min(20, round(float(sc), 1))}
+
+def compute_composite(stage_r, rs_r, vp_r, fund_score=7.5, cat_score=1.0):
+    raw = stage_r['score'] + rs_r['score'] + vp_r['score'] + fund_score + cat_score
+    fs = stage_r.get('full_stage', 'UNKNOWN')
+    cap = STAGE_CAPS.get(fs, 50)
+    comp = min(raw, cap)
+    bucket = 'NEUTRAL'
+    for bn, (lo, hi) in BUCKETS_RANGES.items():
+        if lo <= comp <= hi: bucket = bn; break
+    if fs == '4' and bucket not in ('SELL', 'AVOID'): bucket = 'AVOID'
+    if fs == '3' and bucket == 'MUST_BUY': bucket = 'NEUTRAL'
+    return {'composite_score': round(float(comp), 1), 'raw_composite': round(float(raw), 1),
+            'bucket': bucket, 'stage_cap_applied': comp < raw}
+
+# ── UNIVERSE LOADER ──
+def load_universe():
+    h = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.niftyindices.com/'}
+    stocks = {}
+    r = requests.get(INDEX_URLS['total_market'], headers=h, timeout=15)
+    if r.status_code == 200 and not r.text.strip().startswith('<'):
+        for row in csv.DictReader(io.StringIO(r.text)):
+            sym = row.get('Symbol', '').strip()
+            if sym:
+                stocks[sym] = {
+                    'symbol': sym, 'company_name': row.get('Company Name', '').strip()[:80],
+                    'industry': row.get('Industry', '').strip(), 'sector': row.get('Industry', '').strip(),
+                    'isin': row.get('ISIN Code', '').strip(), 'cap_bucket': 'large',
+                    'yf_ticker': f'{sym}.NS', 'is_active': True
+                }
+    for idx in ['nifty50', 'midcap150', 'smallcap250', 'microcap250']:
+        try:
+            r = requests.get(INDEX_URLS[idx], headers=h, timeout=15)
+            if r.status_code == 200 and not r.text.strip().startswith('<'):
+                cm = {'nifty50': 'large', 'midcap150': 'mid', 'smallcap250': 'small', 'microcap250': 'micro'}
+                for row in csv.DictReader(io.StringIO(r.text)):
+                    sym = row.get('Symbol', '').strip()
+                    if sym in stocks: stocks[sym]['cap_bucket'] = cm.get(idx, 'large')
+        except: pass
+    return list(stocks.values())
+
+# ── DATA DOWNLOAD ──
+def download_batch(symbols, period, interval, batch_size=50):
+    all_data = {}
+    tickers = [f"{s}.NS" for s in symbols]
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i+batch_size]
+        try:
+            data = yf.download(batch, period=period, interval=interval, progress=False, threads=True)
+            if not data.empty:
+                if len(batch) == 1:
+                    sym = batch[0].replace('.NS', '')
+                    c = data['Close'].squeeze().dropna()
+                    if len(c) >= 20:
+                        all_data[sym] = {k: data[k].squeeze().dropna() for k in ['Close','Volume','High','Low']}
+                else:
+                    for t in batch:
+                        sym = t.replace('.NS', '')
+                        try:
+                            c = data['Close'][t].dropna()
+                            if len(c) >= 20:
+                                all_data[sym] = {k: data[k][t].dropna() for k in ['Close','Volume','High','Low']}
+                        except: pass
+            time.sleep(0.3)
+        except: pass
+    return all_data
+
+# ── MAIN ──
+def main():
+    start = datetime.now()
+    today = start.strftime('%Y-%m-%d')
+    print(f"{'='*60}")
+    print(f"AlphaRadar Daily Scoring — {today}")
+    print(f"{'='*60}")
+
+    # 1. Load universe
+    print("\n[1/5] Loading universe from NSE...")
+    stocks = load_universe()
+    print(f"  Loaded {len(stocks)} stocks")
+    
+    # Upsert universe
+    rows = [{k: v for k, v in s.items()} for s in stocks]
+    sb_upsert('ar_universe', rows)
+    
+    symbols = [s['symbol'] for s in stocks]
+    uni_map = {s['symbol']: s for s in stocks}
+
+    # 2. Download weekly data
+    print("\n[2/5] Downloading weekly data (3Y)...")
+    weekly = download_batch(symbols, "3y", "1wk")
+    print(f"  Weekly: {len(weekly)} stocks")
+
+    # 3. Download daily data
+    print("\n[3/5] Downloading daily data (1Y)...")
+    daily = download_batch(symbols, "1y", "1d")
+    print(f"  Daily: {len(daily)} stocks")
+
+    # 4. Benchmark + scoring
+    print("\n[4/5] Scoring...")
+    nifty = yf.download(BENCHMARK, period="3y", interval="1wk", progress=False)
+    nifty_close = nifty['Close'].squeeze().dropna()
+
+    # 52w returns for RS percentile
+    univ_rets, sym_rets = [], {}
+    for sym, w in weekly.items():
+        c = w['Close']
+        if len(c) >= 52:
+            ret = float((c.iloc[-1] / c.iloc[-52]) - 1)
+            univ_rets.append(ret); sym_rets[sym] = ret
+    
+    sec_rets = {}
+    for sym, ret in sym_rets.items():
+        sec = uni_map.get(sym, {}).get('industry', 'Unknown')
+        sec_rets.setdefault(sec, []).append(ret)
+
+    scores = []
+    # Also track previous scores for change detection
+    prev_scores = {}
+    prev = sb_query('ar_daily_scores', select='symbol,composite_score,weinstein_stage,bucket',
+                    params={'order': 'score_date.desc'}, limit=800)
+    for p in prev:
+        if p['symbol'] not in prev_scores:
+            prev_scores[p['symbol']] = p
+
+    for sym in weekly:
+        if sym not in daily: continue
+        try:
+            w, d = weekly[sym], daily[sym]
+            sec = uni_map.get(sym, {}).get('industry', 'Unknown')
+            stage = classify_stage(w['Close'], w['Volume'])
+            rs = compute_rs_score(w['Close'], nifty_close, univ_rets, sec_rets.get(sec, []))
+            vp = compute_vp_score(d['Close'], d['Volume'], d['High'], d['Low'], w['Close'], w['High'], w['Low'])
+            comp = compute_composite(stage, rs, vp)
+            
+            price = float(d['Close'].iloc[-1])
+            prev_price = float(d['Close'].iloc[-2]) if len(d['Close']) > 1 else price
+            chg = (price - prev_price) / prev_price * 100
+
+            # Score change vs previous day
+            prev_sc = prev_scores.get(sym, {}).get('composite_score')
+            score_chg = round(comp['composite_score'] - float(prev_sc), 1) if prev_sc else None
+            prev_stage = prev_scores.get(sym, {}).get('weinstein_stage')
+            stage_changed = prev_stage is not None and prev_stage != stage['full_stage']
+
+            scores.append({
+                'symbol': sym, 'score_date': today,
+                'composite_score': comp['composite_score'], 'raw_composite': comp['raw_composite'],
+                'bucket': comp['bucket'],
+                'stage_score': stage['score'], 'rs_score': rs['score'],
+                'volume_price_score': vp['score'],
+                'fundamental_score': 7.5, 'catalyst_score': 1.0,
+                'weinstein_stage': stage['full_stage'],
+                'rs_percentile': rs['rs_percentile'], 'sector_percentile': rs['sector_percentile'],
+                'rs_new_high': bool(rs['rs_new_high']),
+                'stage_cap_applied': bool(comp['stage_cap_applied']),
+                'price': round(price, 2), 'price_change_pct': round(chg, 2),
+                'high_52w': round(float(d['High'].max()), 2),
+                'low_52w': round(float(d['Low'].min()), 2),
+                'price_vs_ma': round(stage.get('price_vs_ma', 0) * 100, 2),
+                'ma_slope': stage.get('ma_slope', 0),
+                'data_quality': 'full',
+                'score_change': score_chg,
+                'stage_changed': stage_changed,
+            })
+        except: pass
+
+    print(f"  Scored: {len(scores)} stocks")
+    bc = Counter(s['bucket'] for s in scores)
+    sc = Counter(s['weinstein_stage'] for s in scores)
+    for b in ['MUST_BUY','CAN_BUY','NEUTRAL','AVOID','SELL']:
+        print(f"    {b}: {bc.get(b,0)}")
+
+    # 5. Write to Supabase
+    print("\n[5/5] Writing to Supabase...")
+    written = sb_upsert('ar_daily_scores', scores)
+    print(f"  Written: {written}")
+
+    elapsed = (datetime.now() - start).total_seconds() / 60
+
+    # Alerts: stage changes, big score moves
+    alerts = []
+    stage_changes = [s for s in scores if s.get('stage_changed')]
+    big_movers = [s for s in scores if s.get('score_change') and abs(s['score_change']) >= 10]
+    
+    for s in stage_changes:
+        prev_stg = prev_scores.get(s['symbol'], {}).get('weinstein_stage', '?')
+        alerts.append(f"🔄 {s['symbol']}: Stage {prev_stg} → {s['weinstein_stage']} (Score: {s['composite_score']})")
+
+    # Telegram summary
+    top = sorted(scores, key=lambda x: -x['composite_score'])[:5]
+    msg = f"""🎯 <b>AlphaRadar — {today}</b>
+
+📊 <b>{len(scores)}</b> stocks scored in {elapsed:.1f}min
+
+🟢 Must Buy: {bc.get('MUST_BUY', 0)}
+🔵 Can Buy: {bc.get('CAN_BUY', 0)}
+⚪ Neutral: {bc.get('NEUTRAL', 0)}
+🟡 Avoid: {bc.get('AVOID', 0)}
+🔴 Sell: {bc.get('SELL', 0)}
+
+📈 <b>Top 5:</b>
+"""
+    for t in top:
+        chg_str = f" ({t.get('score_change',0):+.1f})" if t.get('score_change') else ""
+        msg += f"  {t['symbol']}: {t['composite_score']:.1f}{chg_str} | {t['weinstein_stage']} | RS {t['rs_percentile']:.0f}%\n"
+
+    if stage_changes:
+        msg += f"\n🔄 <b>{len(stage_changes)} Stage Changes:</b>\n"
+        for a in alerts[:10]:
+            msg += f"  {a}\n"
+
+    if big_movers:
+        msg += f"\n⚡ <b>{len(big_movers)} Big Movers (±10pts):</b>\n"
+        for s in sorted(big_movers, key=lambda x: -abs(x['score_change']))[:5]:
+            msg += f"  {s['symbol']}: {s['score_change']:+.1f} → {s['composite_score']:.1f}\n"
+
+    send_telegram(msg)
+    print(f"\n✅ Complete! {len(scores)} stocks, {elapsed:.1f} min")
+
+if __name__ == '__main__':
+    main()
