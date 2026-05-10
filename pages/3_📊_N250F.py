@@ -2,20 +2,14 @@
 AlphaRadar — N250F Momentum Strategy
 =====================================
 Nifty 250 Fortnightly Momentum — Top 20 by 3-month return
-Real backtest: Jan 2015 – Apr 2025 | yfinance data | 258 rebalances | 1,715 trades
-
-Two sections:
-  1. BACKTEST VAULT — Full 10-year history, interactive, exportable
-  2. LIVE TRACKER  — Current portfolio, next rebalance signal, entry/exit list
+Real backtest: Jun 2015 – May 2026 | yfinance data | 285 rebalances | 1,897 closed trades
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime, timedelta
-import io
 import sys
 import os
 
@@ -31,60 +25,29 @@ except Exception as e:
 
 st.set_page_config(page_title="N250F — AlphaRadar", page_icon="📊", layout="wide")
 
-# ── STYLES ────────────────────────────────────────────────────────────────────
+# ── LIGHT THEME — matches AlphaRadar main page ────────────────────────────────
 st.markdown("""
 <style>
-.stApp { background: #0a0d13; color: #e2e8f0; }
-.main .block-container { padding: 1.5rem 2rem; max-width: 100%; }
-[data-testid="stMetricValue"] { font-size: 1.5rem !important; font-weight: 700 !important; }
-[data-testid="stMetricDelta"] { font-size: 0.85rem !important; }
-.n250f-header {
-    background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
-    border-radius: 12px; padding: 24px 28px; margin-bottom: 24px;
-    border: 1px solid rgba(56,189,248,0.2);
-}
-.n250f-header h1 { font-size: 28px; font-weight: 800; color: #38bdf8; margin: 0 0 6px 0; }
-.n250f-header p  { font-size: 13px; color: #94a3b8; margin: 0; }
-.section-card {
-    background: #111827; border: 1px solid #1f2937;
-    border-radius: 10px; padding: 20px 22px; margin-bottom: 16px;
-}
-.metric-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-.mcard {
-    background: #1e293b; border-radius: 8px; padding: 14px 18px;
-    border: 1px solid #334155; min-width: 130px; flex: 1;
-}
-.mcard-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
-.mcard-val { font-size: 22px; font-weight: 700; color: #e2e8f0; }
-.mcard-val.green { color: #22d3a0; }
-.mcard-val.red { color: #f87171; }
-.mcard-val.amber { color: #fbbf24; }
-.mcard-val.blue { color: #60a5fa; }
-.rebal-chip {
-    display: inline-block; font-size: 11px; padding: 2px 8px;
-    border-radius: 12px; margin: 2px; font-weight: 500;
-}
-.chip-in  { background: rgba(34,211,160,0.15); color: #22d3a0; border: 1px solid rgba(34,211,160,0.3); }
-.chip-out { background: rgba(248,113,113,0.15); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
-.chip-hold { background: rgba(100,116,139,0.2); color: #94a3b8; border: 1px solid #334155; }
-.next-rebal-box {
-    background: rgba(251,191,36,0.08); border: 2px solid rgba(251,191,36,0.4);
-    border-radius: 10px; padding: 16px 20px; text-align: center;
-}
-.next-rebal-date { font-size: 26px; font-weight: 800; color: #fbbf24; }
-.signal-enter { background: rgba(34,211,160,0.12); border-left: 3px solid #22d3a0; padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 4px 0; }
-.signal-exit  { background: rgba(248,113,113,0.12); border-left: 3px solid #f87171; padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 4px 0; }
-.disclaimer { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); border-radius: 8px; padding: 12px 16px; font-size: 11px; color: #fca5a5; line-height: 1.7; margin-top: 24px; }
+[data-testid="stMetricValue"]  { font-size: 1.5rem !important; font-weight: 700 !important; }
+[data-testid="stMetricDelta"]  { font-size: 0.8rem !important; }
+.chip-in   { display:inline-block; font-size:11px; padding:2px 8px; border-radius:12px; margin:2px;
+             background:#dcfce7; color:#166534; border:1px solid #bbf7d0; font-weight:500; }
+.chip-out  { display:inline-block; font-size:11px; padding:2px 8px; border-radius:12px; margin:2px;
+             background:#fee2e2; color:#991b1b; border:1px solid #fecaca; font-weight:500; }
+.trade-win  { border-left:3px solid #059669; background:#f0fdf4; padding:8px 12px;
+              border-radius:0 6px 6px 0; margin:3px 0; font-size:13px; }
+.trade-loss { border-left:3px solid #dc2626; background:#fff1f2; padding:8px 12px;
+              border-radius:0 6px 6px 0; margin:3px 0; font-size:13px; }
+.entry-sig  { border-left:3px solid #059669; background:#f0fdf4; padding:10px 14px;
+              border-radius:0 6px 6px 0; margin:4px 0; }
+.exit-sig   { border-left:3px solid #dc2626; background:#fff1f2; padding:10px 14px;
+              border-radius:0 6px 6px 0; margin:4px 0; }
+.rebal-box  { border:2px solid #f59e0b; background:#fffbeb; border-radius:10px;
+              padding:20px 24px; text-align:center; }
+.rebal-date { font-size:28px; font-weight:800; color:#b45309; }
+.disclaimer { background:#fef2f2; border:1px solid #fecaca; border-radius:8px;
+              padding:12px 16px; font-size:11px; color:#991b1b; line-height:1.7; margin-top:24px; }
 </style>
-""", unsafe_allow_html=True)
-
-# ── HEADER ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="n250f-header">
-  <h1>📊 N250F — Nifty 250 Fortnightly Momentum</h1>
-  <p>Top 20 stocks by 3-month return · Rebalanced every fortnight · Equal weight · 0.1% transaction cost applied</p>
-  <p style="margin-top:6px;color:#475569">Real yfinance data · Jan 2015 – Apr 2025 · 258 rebalances · 1,715 closed trades</p>
-</div>
 """, unsafe_allow_html=True)
 
 if not DATA_LOADED:
@@ -98,614 +61,664 @@ rebals = DATA['rebal']
 curr   = DATA['curr']
 yr_ret = perf['yearly_returns']
 
-# Build portfolio value series from rebalances
-port_vals = [(r['dt'], r['vs']) for r in rebals] + [(rebals[-1]['dt'], rebals[-1]['ve'])]
-port_df   = pd.DataFrame(port_vals, columns=['date', 'value'])
-port_df['date'] = pd.to_datetime(port_df['date'])
-port_df = port_df.drop_duplicates('date').sort_values('date')
+# Safely derive best/worst year — handles both stored keys and compute fallback
+yr_vals = {}
+for k, v in yr_ret.items():
+    try:
+        yr_vals[int(k)] = float(v)
+    except Exception:
+        yr_vals[k] = float(v)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TOP METRICS
-# ═══════════════════════════════════════════════════════════════════════════════
+best_yr_val  = float(perf.get('best_year',  max(yr_vals.values())))
+worst_yr_val = float(perf.get('worst_year', min(yr_vals.values())))
+best_yr_lbl  = str(perf.get('best_year_label',
+    [k for k, v in yr_vals.items() if v == best_yr_val][0]))
+worst_yr_lbl = str(perf.get('worst_year_label',
+    [k for k, v in yr_vals.items() if v == worst_yr_val][0]))
+
+end_date_str = meta.get('end_date', rebals[-1]['dt'])
+
+# Build portfolio value series for chart
+port_rows = [(r['dt'], r['vs']) for r in rebals]
+port_rows.append((rebals[-1]['dt'], rebals[-1]['ve']))
+port_df = (pd.DataFrame(port_rows, columns=['date', 'value'])
+             .drop_duplicates('date').sort_values('date'))
+port_df['date'] = pd.to_datetime(port_df['date'])
+
+# ── HEADER ────────────────────────────────────────────────────────────────────
+st.markdown("## 📊 N250F — Nifty 250 Fortnightly Momentum")
+st.caption(
+    f"Top 20 by 3-month return · Equal weight · Fortnightly rebalance · 0.1% cost · "
+    f"Real yfinance data · Jun 2015 – {end_date_str} · "
+    f"{perf['total_rebalances']} rebalances · {perf['total_trades']} closed trades"
+)
+st.divider()
+
+# ── TOP METRICS ROW ───────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-metrics = [
-    (c1, "CAGR (10yr)", f"{perf['cagr_pct']}%", "green", "vs 11.3% Nifty50"),
-    (c2, "₹10L → ", f"₹{perf['final_corpus']/100000:.1f}L", "green", f"Total +{perf['total_return_pct']:.0f}%"),
-    (c3, "Max Drawdown", f"{perf['max_drawdown_pct']:.1f}%", "red", "Benchmark: -38.4%"),
-    (c4, "Sharpe Ratio", f"{perf['sharpe']}", "amber", f"Volatility {perf['volatility_pct']:.1f}%"),
-    (c5, "Win Rate", f"{perf['win_rate_pct']}%", "blue", f"{perf['total_trades']} trades"),
-    (c6, "Avg Win / Loss", f"+{perf['avg_win_pct']:.1f}% / {perf['avg_loss_pct']:.1f}%", "green", f"Payoff {abs(perf['avg_win_pct']/perf['avg_loss_pct']):.1f}x"),
-]
-for col, label, val, color, sub in metrics:
-    col.metric(label, val, sub)
+c1.metric("CAGR (10+ yr)",      f"{perf['cagr_pct']}%",  "vs 11.3% Nifty50")
+c2.metric("₹10L grew to",       f"₹{perf['final_corpus']/100000:.1f}L",
+                                  f"+{perf['total_return_pct']:.0f}% total")
+c3.metric("Max Drawdown",       f"{perf['max_drawdown_pct']:.1f}%", "Nifty50: -38.4%")
+c4.metric("Sharpe Ratio",       str(perf['sharpe']),      f"Vol {perf['volatility_pct']:.1f}%")
+c5.metric("Win Rate",           f"{perf['win_rate_pct']}%",
+                                  f"Payoff {abs(perf['avg_win_pct']/perf['avg_loss_pct']):.2f}x")
+c6.metric("Best / Worst Year",  f"+{best_yr_val:.1f}% / {worst_yr_val:.1f}%",
+                                  f"{best_yr_lbl} / {worst_yr_lbl}")
 
 st.divider()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TWO MAIN SECTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
-sec1_tab, sec2_tab = st.tabs(["🗄️  BACKTEST VAULT — 10 Year History", "🟢  LIVE TRACKER — Current & Next Rebalance"])
+vault_tab, live_tab = st.tabs([
+    "🗄️  BACKTEST VAULT — 10+ Year History",
+    "🟢  LIVE TRACKER — Current Portfolio & Next Rebalance",
+])
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 1: BACKTEST VAULT
+# SECTION 1 — BACKTEST VAULT
 # ═══════════════════════════════════════════════════════════════════════════════
-with sec1_tab:
+with vault_tab:
+    t1, t2, t3, t4, t5 = st.tabs([
+        "📈 Growth & Overview",
+        "📅 Rebalance Explorer",
+        "📋 Trade-by-Trade P&L",
+        "📊 Year-by-Year",
+        "💾 Export",
+    ])
 
-    v1, v2, v3, v4, v5 = st.tabs(["📈 Growth & Overview", "📅 Rebalance Explorer", "📋 Trade-by-Trade P&L", "📊 Yearly Breakdown", "💾 Export"])
-
-    # ── 1.1 GROWTH CHART ──────────────────────────────────────────────────────
-    with v1:
-        st.subheader("Portfolio growth — ₹10,00,000 starting capital")
-
-        # Build growth chart
+    # ── GROWTH & OVERVIEW ─────────────────────────────────────────────────────
+    with t1:
+        st.subheader("Portfolio growth — ₹10,00,000 starting capital (Jun 2015)")
         fig = go.Figure()
+        t0 = port_df['date'].iloc[0]
+        bench = [1_000_000 * (1.113 ** ((d - t0).days / 365.25)) for d in port_df['date']]
+        fig.add_trace(go.Scatter(
+            x=port_df['date'], y=bench,
+            name='Nifty50 Benchmark (11.3% CAGR)',
+            line=dict(color='#9ca3af', width=1.5, dash='dash'),
+            hovertemplate='Benchmark: ₹%{y:,.0f}<extra></extra>',
+        ))
         fig.add_trace(go.Scatter(
             x=port_df['date'], y=port_df['value'],
-            name='N250F Strategy', line=dict(color='#22d3a0', width=2.5),
-            fill='tozeroy', fillcolor='rgba(34,211,160,0.05)',
-            hovertemplate='%{x|%d %b %Y}<br>₹%{y:,.0f}<extra></extra>'
-        ))
-        # Nifty50 approximation (11.3% CAGR from 1M)
-        nifty_vals = [1_000_000 * (1.113 ** ((d - port_df['date'].iloc[0]).days / 365.25)) for d in port_df['date']]
-        fig.add_trace(go.Scatter(
-            x=port_df['date'], y=nifty_vals,
-            name='Nifty50 (11.3% CAGR)', line=dict(color='#6b7280', width=1.5, dash='dash'),
-            hovertemplate='Nifty50: ₹%{y:,.0f}<extra></extra>'
+            name='N250F Strategy',
+            line=dict(color='#2563eb', width=2.5),
+            fill='tonexty', fillcolor='rgba(37,99,235,0.07)',
+            hovertemplate='%{x|%d %b %Y}: ₹%{y:,.0f}<extra></extra>',
         ))
         fig.update_layout(
-            height=380, plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-            font=dict(color='#94a3b8', size=12),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0, font=dict(size=11)),
-            xaxis=dict(showgrid=False, color='#475569'),
-            yaxis=dict(showgrid=True, gridcolor='#1f2937', color='#475569',
+            height=370, plot_bgcolor='white', paper_bgcolor='white',
+            font=dict(color='#374151', size=12),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+            xaxis=dict(showgrid=False, color='#6b7280'),
+            yaxis=dict(showgrid=True, gridcolor='#f3f4f6', color='#6b7280',
                        tickformat='₹,.0f'),
-            margin=dict(l=10, r=10, t=40, b=10), hovermode='x unified'
+            margin=dict(l=10, r=10, t=40, b=10), hovermode='x unified',
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Calendar return heatmap
         st.subheader("Calendar year returns")
-        yr_df = pd.DataFrame(list(yr_ret.items()), columns=['Year','Return'])
-        yr_df['Year'] = yr_df['Year'].astype(str)
-        yr_df['Color'] = yr_df['Return'].apply(lambda r: '#22d3a0' if r >= 0 else '#f87171')
-        yr_df['Label'] = yr_df['Return'].apply(lambda r: f"{r:+.1f}%")
-
+        yr_plot = sorted([(str(k), float(v)) for k, v in yr_vals.items()], key=lambda x: x[0])
         fig2 = go.Figure(go.Bar(
-            x=yr_df['Year'], y=yr_df['Return'],
-            marker_color=yr_df['Color'], text=yr_df['Label'], textposition='outside',
-            hovertemplate='%{x}: %{y:+.1f}%<extra></extra>'
+            x=[y[0] for y in yr_plot],
+            y=[y[1] for y in yr_plot],
+            marker_color=['#059669' if y[1] >= 0 else '#dc2626' for y in yr_plot],
+            text=[f"{y[1]:+.1f}%" for y in yr_plot],
+            textposition='outside',
+            hovertemplate='%{x}: %{y:+.1f}%<extra></extra>',
         ))
-        fig2.add_hline(y=0, line_color='#475569', line_width=1)
+        fig2.add_hline(y=0, line_color='#6b7280', line_width=1)
         fig2.update_layout(
-            height=280, plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-            font=dict(color='#94a3b8'), showlegend=False,
-            yaxis=dict(showgrid=True, gridcolor='#1f2937', ticksuffix='%'),
-            xaxis=dict(showgrid=False), margin=dict(l=10, r=10, t=20, b=10)
+            height=280, plot_bgcolor='white', paper_bgcolor='white',
+            font=dict(color='#374151'), showlegend=False,
+            yaxis=dict(showgrid=True, gridcolor='#f3f4f6', ticksuffix='%'),
+            xaxis=dict(showgrid=False),
+            margin=dict(l=10, r=10, t=20, b=10),
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Key stats grid
-        st.subheader("Strategy deep-dive stats")
-        cols = st.columns(4)
-        stats = [
-            ("Total rebalances", perf['total_rebalances'], ""),
-            ("Avg turnover/rebal", f"~{sum(r['to'] for r in rebals)/len(rebals):.1f}%", "(stocks changed)"),
-            ("Total transaction cost", f"₹{perf['total_cost_rs']/1000:.0f}K", "0.1% per trade"),
-            ("Best year", f"+{perf['best_year']:.1f}%", "2023"),
-            ("Worst year", f"{perf['worst_year']:.1f}%", "2025 YTD"),
-            ("Payoff ratio", f"{abs(perf['avg_win_pct']/perf['avg_loss_pct']):.2f}x", "Win/loss size"),
-            ("Avg holding period", f"~{sum(r['hold_days'] for rbl in rebals for r in rbl['sells'] if 'hold_days' in r) // max(1,sum(len(rbl['sells']) for rbl in rebals)):.0f} days" if any(rbl['sells'] for rbl in rebals) else "~28d", "per stock"),
-            ("Profitable years", f"{sum(1 for v in yr_ret.values() if v > 0)}/{len(yr_ret)}", "out of 11"),
-        ]
-        for i, (lb, vl, sb) in enumerate(stats):
-            cols[i % 4].metric(lb, vl, sb)
+        st.subheader("Strategy statistics")
+        all_s   = [s for r in rebals for s in r['sells']]
+        avg_hld = int(np.mean([s['days'] for s in all_s])) if all_s else 0
+        avg_to  = sum(r['to'] for r in rebals) / len(rebals) if rebals else 0
+        prof_yr = sum(1 for v in yr_vals.values() if v > 0)
 
-    # ── 1.2 REBALANCE EXPLORER ────────────────────────────────────────────────
-    with v2:
-        st.subheader("Explore any rebalance date")
-        st.caption(f"258 fortnightly rebalances from Jun 2015 to Apr 2025")
+        row1 = st.columns(4)
+        row1[0].metric("Total rebalances",   perf['total_rebalances'])
+        row1[1].metric("Avg turnover/rebal", f"~{avg_to:.1f}%", "stocks changed each time")
+        row1[2].metric("Avg holding period", f"~{avg_hld} days", "per stock")
+        row1[3].metric("Total cost paid",    f"₹{perf['total_cost_rs']/1000:.0f}K", "0.1%/trade")
+        row2 = st.columns(4)
+        row2[0].metric("Avg win",          f"+{perf['avg_win_pct']:.2f}%")
+        row2[1].metric("Avg loss",         f"{perf['avg_loss_pct']:.2f}%")
+        row2[2].metric("Payoff ratio",     f"{abs(perf['avg_win_pct']/perf['avg_loss_pct']):.2f}x")
+        row2[3].metric("Profitable years", f"{prof_yr}/{len(yr_vals)}")
 
-        # Date picker from actual rebalance dates
-        all_dates = [r['dt'] for r in rebals]
-        selected_date = st.select_slider(
+    # ── REBALANCE EXPLORER ────────────────────────────────────────────────────
+    with t2:
+        st.subheader("Explore any rebalance event")
+        st.caption(f"{len(rebals)} fortnightly rebalances · Jun 2015 – May 2026")
+
+        rebal_dates = [r['dt'] for r in rebals]
+        sel_date = st.select_slider(
             "Select rebalance date",
-            options=all_dates,
-            value=all_dates[-1],
-            label_visibility="collapsed"
+            options=rebal_dates,
+            value=rebal_dates[-1],
+            label_visibility="collapsed",
         )
 
-        sel = next((r for r in rebals if r['dt'] == selected_date), None)
+        sel = next((r for r in rebals if r['dt'] == sel_date), None)
         if sel:
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Portfolio value", f"₹{sel['vs']/100000:.2f}L")
-            d2.metric("Period return", f"{sel['ret']:+.2f}%",
-                      delta_color="normal" if sel['ret'] >= 0 else "inverse")
-            d3.metric("Stocks changed", f"{sel['ne']} in / {sel['nx']} out")
-            d4.metric("Turnover", f"{sel['to']:.1f}%")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Portfolio value",  f"₹{sel['vs']/100000:.2f}L")
+            m2.metric("Period return",    f"{sel['ret']:+.2f}%")
+            m3.metric("Changes",          f"{sel['ne']} in / {sel['nx']} out")
+            m4.metric("Turnover",         f"{sel['to']:.1f}%")
 
-            st.markdown("---")
-            c_snap, c_trades = st.columns([3, 2])
+            st.divider()
+            snap_col, trades_col = st.columns([3, 2])
 
-            with c_snap:
-                st.markdown("**Portfolio snapshot on this date**")
+            with snap_col:
+                st.markdown("**Full holdings snapshot**")
                 if sel['snap']:
-                    snap_df = pd.DataFrame(sel['snap'])
-                    snap_df.columns = ['Ticker', 'Entry Date', 'Entry ₹', 'Price ₹', 'Mkt Val ₹', 'Unreal P&L ₹', 'Unreal %', 'Mom Rank']
-                    snap_df['Unreal %'] = snap_df['Unreal %'].apply(lambda x: f"{x:+.1f}%")
-                    snap_df['Entry ₹'] = snap_df['Entry ₹'].apply(lambda x: f"₹{x:,.2f}")
-                    snap_df['Price ₹'] = snap_df['Price ₹'].apply(lambda x: f"₹{x:,.2f}")
-                    snap_df['Mkt Val ₹'] = snap_df['Mkt Val ₹'].apply(lambda x: f"₹{x:,.0f}")
-                    snap_df['Unreal P&L ₹'] = snap_df['Unreal P&L ₹'].apply(lambda x: f"₹{x:+,.0f}")
-                    st.dataframe(snap_df, use_container_width=True, hide_index=True, height=350)
+                    sdf = pd.DataFrame([{
+                        'Ticker':      h['t'],
+                        'Entry Date':  h['ed'],
+                        'Entry ₹':     h['ep'],
+                        'Price ₹':     h['cp'],
+                        'Mkt Val ₹':   h['mv'],
+                        'P&L ₹':       h['upnl'],
+                        'Return %':    h['upct'],
+                        'Mom Rank':    h['rnk'],
+                    } for h in sel['snap']])
+                    st.dataframe(
+                        sdf, use_container_width=True, hide_index=True, height=360,
+                        column_config={
+                            'Entry ₹':  st.column_config.NumberColumn(format='₹%.2f'),
+                            'Price ₹':  st.column_config.NumberColumn(format='₹%.2f'),
+                            'Mkt Val ₹':st.column_config.NumberColumn(format='₹%,.0f'),
+                            'P&L ₹':    st.column_config.NumberColumn(format='₹%+,.0f'),
+                            'Return %': st.column_config.NumberColumn(format='%+.1f%%'),
+                        },
+                    )
                 else:
-                    st.info("No snapshot data for this date")
+                    st.info("No snapshot for this date")
 
-            with c_trades:
-                st.markdown("**Stocks entered this rebalance**")
-                for e in sel['ents']:
-                    st.markdown(f"<div class='rebal-chip chip-in'>▲ {e}</div>", unsafe_allow_html=True)
-                if not sel['ents']:
-                    st.caption("No new entries")
+            with trades_col:
+                if sel['ents']:
+                    st.markdown("**Entered this rebalance**")
+                    chips = " ".join(
+                        f"<span class='chip-in'>▲ {e}</span>" for e in sel['ents']
+                    )
+                    st.markdown(chips, unsafe_allow_html=True)
+                if sel['exts']:
+                    st.markdown("**Exited this rebalance**")
+                    chips = " ".join(
+                        f"<span class='chip-out'>▼ {x}</span>" for x in sel['exts']
+                    )
+                    st.markdown(chips, unsafe_allow_html=True)
 
-                st.markdown("**Stocks exited this rebalance**")
-                for x in sel['exts']:
-                    st.markdown(f"<div class='rebal-chip chip-out'>▼ {x}</div>", unsafe_allow_html=True)
-                if not sel['exts']:
-                    st.caption("No exits")
-
-                st.markdown("**Closed trade details**")
                 if sel['sells']:
+                    st.markdown("**Closed trade P&L**")
                     for s in sel['sells']:
-                        pnl_color = '#22d3a0' if s['pct'] >= 0 else '#f87171'
-                        st.markdown(f"""
-                        <div style="background:#1e293b;border-radius:6px;padding:8px 12px;margin:4px 0;border-left:3px solid {pnl_color}">
-                          <strong>{s['t']}</strong> &nbsp;
-                          <span style="color:#94a3b8;font-size:12px">Held {s['days']}d</span><br>
-                          <span style="font-size:12px">Buy ₹{s['ep']:,.2f} → Sell ₹{s['xp']:,.2f}</span><br>
-                          <span style="color:{pnl_color};font-weight:600">{s['pct']:+.2f}% &nbsp; ₹{s['pnl']:+,.0f}</span>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        cls   = 'trade-win' if s['pct'] >= 0 else 'trade-loss'
+                        color = '#059669'   if s['pct'] >= 0 else '#dc2626'
+                        st.markdown(
+                            f"<div class='{cls}'><strong>{s['t']}</strong> · {s['days']}d · "
+                            f"₹{s['ep']:,.2f}→₹{s['xp']:,.2f} &nbsp; "
+                            f"<strong style='color:{color}'>{s['pct']:+.2f}% ₹{s['pnl']:+,.0f}</strong></div>",
+                            unsafe_allow_html=True,
+                        )
                 else:
-                    st.caption("No closes (first rebalance or all holds)")
+                    st.caption("No closed trades at this rebalance")
 
-        # Rebalance timeline
-        st.markdown("---")
-        st.subheader("All rebalances — timeline view")
-        timeline_df = pd.DataFrame([{
-            'Date': r['dt'], 'Value (₹L)': round(r['vs']/100000, 2),
-            'Period Return': r['ret'], 'Entries': r['ne'], 'Exits': r['nx'], 'Turnover%': r['to']
-        } for r in rebals])
-        timeline_df['Date'] = pd.to_datetime(timeline_df['Date'])
-
-        fig3 = go.Figure()
-        fig3.add_trace(go.Bar(
-            x=timeline_df['Date'], y=timeline_df['Period Return'],
-            name='Period Return',
-            marker_color=['#22d3a0' if v >= 0 else '#f87171' for v in timeline_df['Period Return']],
-            hovertemplate='%{x|%d %b %Y}<br>Return: %{y:+.2f}%<extra></extra>'
+        st.divider()
+        st.subheader("All fortnightly period returns — timeline")
+        tl_rets = [r['ret'] for r in rebals]
+        fig3 = go.Figure(go.Bar(
+            x=[r['dt'] for r in rebals], y=tl_rets,
+            marker_color=['#059669' if v >= 0 else '#dc2626' for v in tl_rets],
+            hovertemplate='%{x}: %{y:+.2f}%<extra></extra>',
         ))
+        fig3.add_hline(y=0, line_color='#6b7280', line_width=1)
         fig3.update_layout(
-            height=250, plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-            font=dict(color='#94a3b8'), showlegend=False,
-            yaxis=dict(showgrid=True, gridcolor='#1f2937', ticksuffix='%'),
-            xaxis=dict(showgrid=False), margin=dict(l=10, r=10, t=20, b=10)
+            height=240, plot_bgcolor='white', paper_bgcolor='white',
+            font=dict(color='#374151'), showlegend=False,
+            yaxis=dict(showgrid=True, gridcolor='#f3f4f6', ticksuffix='%'),
+            xaxis=dict(showgrid=False),
+            margin=dict(l=10, r=10, t=10, b=10),
         )
         st.plotly_chart(fig3, use_container_width=True)
 
-    # ── 1.3 TRADE-BY-TRADE P&L ───────────────────────────────────────────────
-    with v3:
-        st.subheader("All closed trades — 1,715 real trade records")
+    # ── TRADE-BY-TRADE P&L ────────────────────────────────────────────────────
+    with t3:
+        st.subheader(f"All {perf['total_trades']} closed trades — real entry & exit prices")
 
-        # Build full trade table
         all_sells = []
         for r in rebals:
             for s in r['sells']:
                 all_sells.append({
-                    'Exit Date': s['xd'], 'Ticker': s['t'],
-                    'Entry Date': s['ed'], 'Entry ₹': s['ep'],
-                    'Exit ₹': s['xp'], 'Return %': s['pct'],
-                    'P&L ₹': s['pnl'], 'Hold Days': s['days'],
-                    'Rebal Date': r['dt']
+                    'Exit Date':  s['xd'],
+                    'Ticker':     s['t'],
+                    'Entry Date': s['ed'],
+                    'Entry ₹':    s['ep'],
+                    'Exit ₹':     s['xp'],
+                    'Return %':   s['pct'],
+                    'P&L ₹':      s['pnl'],
+                    'Hold Days':  s['days'],
                 })
-        trade_full = pd.DataFrame(all_sells)
-        if not trade_full.empty:
-            trade_full = trade_full.sort_values('Exit Date', ascending=False)
+        trade_df = pd.DataFrame(all_sells).sort_values('Exit Date', ascending=False)
 
-            # Filters
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                yr_filter = st.selectbox("Year", ['All'] + sorted(set(s[:4] for s in trade_full['Exit Date']), reverse=True))
-            with fc2:
-                wl_filter = st.selectbox("Result", ['All', 'Winners', 'Losers'])
-            with fc3:
-                ticker_filter = st.text_input("Ticker filter", placeholder="e.g. BAJFINANCE")
+        f1, f2, f3 = st.columns(3)
+        yr_opts = ['All'] + sorted(set(s[:4] for s in trade_df['Exit Date']), reverse=True)
+        with f1: yr_f  = st.selectbox("Year",   yr_opts)
+        with f2: wl_f  = st.selectbox("Result", ['All', 'Winners only', 'Losers only'])
+        with f3: tk_f  = st.text_input("Ticker", placeholder="e.g. BAJFINANCE")
 
-            ftrades = trade_full.copy()
-            if yr_filter != 'All':
-                ftrades = ftrades[ftrades['Exit Date'].str.startswith(yr_filter)]
-            if wl_filter == 'Winners':
-                ftrades = ftrades[ftrades['Return %'] > 0]
-            elif wl_filter == 'Losers':
-                ftrades = ftrades[ftrades['Return %'] <= 0]
-            if ticker_filter:
-                ftrades = ftrades[ftrades['Ticker'].str.upper().str.contains(ticker_filter.upper())]
+        ft = trade_df.copy()
+        if yr_f != 'All':      ft = ft[ft['Exit Date'].str.startswith(yr_f)]
+        if wl_f == 'Winners only': ft = ft[ft['Return %'] > 0]
+        elif wl_f == 'Losers only': ft = ft[ft['Return %'] <= 0]
+        if tk_f.strip(): ft = ft[ft['Ticker'].str.upper().str.contains(tk_f.strip().upper())]
 
-            c1, c2, c3, c4 = st.columns(4)
-            visible_wins = ftrades[ftrades['Return %'] > 0]
-            visible_loss = ftrades[ftrades['Return %'] <= 0]
-            c1.metric("Showing", len(ftrades))
-            c2.metric("Win rate", f"{len(visible_wins)/len(ftrades)*100:.1f}%" if len(ftrades) else "—")
-            c3.metric("Avg win", f"+{visible_wins['Return %'].mean():.1f}%" if len(visible_wins) else "—")
-            c4.metric("Avg loss", f"{visible_loss['Return %'].mean():.1f}%" if len(visible_loss) else "—")
+        wins = ft[ft['Return %'] > 0]
+        loss = ft[ft['Return %'] <= 0]
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Showing",  len(ft))
+        s2.metric("Win rate", f"{len(wins)/len(ft)*100:.1f}%" if len(ft) else "—")
+        s3.metric("Avg win",  f"+{wins['Return %'].mean():.1f}%" if len(wins) else "—")
+        s4.metric("Avg loss", f"{loss['Return %'].mean():.1f}%" if len(loss) else "—")
 
-            # Style the table
-            def color_return(val):
-                if isinstance(val, (int, float)):
-                    if val > 0: return 'color: #22d3a0'
-                    elif val < 0: return 'color: #f87171'
-                return ''
+        st.dataframe(
+            ft[['Exit Date','Ticker','Entry Date','Entry ₹','Exit ₹','Return %','P&L ₹','Hold Days']],
+            use_container_width=True, hide_index=True, height=480,
+            column_config={
+                'Return %': st.column_config.NumberColumn(format='%+.2f%%'),
+                'P&L ₹':   st.column_config.NumberColumn(format='₹%+,.0f'),
+                'Entry ₹': st.column_config.NumberColumn(format='₹%.2f'),
+                'Exit ₹':  st.column_config.NumberColumn(format='₹%.2f'),
+            },
+        )
 
-            display_df = ftrades[['Exit Date','Ticker','Entry Date','Entry ₹','Exit ₹','Return %','P&L ₹','Hold Days']].copy()
-            st.dataframe(
-                display_df,
-                use_container_width=True, hide_index=True, height=500,
-                column_config={
-                    'Return %': st.column_config.NumberColumn(format='%+.2f%%'),
-                    'P&L ₹': st.column_config.NumberColumn(format='₹%+,.0f'),
-                    'Entry ₹': st.column_config.NumberColumn(format='₹%.2f'),
-                    'Exit ₹': st.column_config.NumberColumn(format='₹%.2f'),
-                }
-            )
+        fig4 = go.Figure(go.Histogram(
+            x=ft['Return %'], nbinsx=60,
+            marker_color='#2563eb', opacity=0.75,
+        ))
+        fig4.add_vline(x=0, line_color='#dc2626', line_width=1.5, line_dash='dash')
+        fig4.update_layout(
+            title='Trade return distribution',
+            height=240, plot_bgcolor='white', paper_bgcolor='white',
+            font=dict(color='#374151'), showlegend=False,
+            xaxis=dict(showgrid=False, ticksuffix='%'),
+            yaxis=dict(showgrid=True, gridcolor='#f3f4f6'),
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
 
-            # P&L distribution
-            fig4 = go.Figure()
-            fig4.add_trace(go.Histogram(
-                x=ftrades['Return %'], nbinsx=60,
-                marker_color=['#22d3a0' if True else '#f87171'],
-                marker=dict(color='#22d3a0', opacity=0.7),
-                name='Trade Returns'
-            ))
-            fig4.add_vline(x=0, line_color='#f87171', line_width=1.5, line_dash='dash')
-            fig4.update_layout(
-                title='Trade return distribution', height=260,
-                plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-                font=dict(color='#94a3b8'), showlegend=False,
-                xaxis=dict(showgrid=False, ticksuffix='%'),
-                yaxis=dict(showgrid=True, gridcolor='#1f2937'),
-                margin=dict(l=10, r=10, t=40, b=10)
-            )
-            st.plotly_chart(fig4, use_container_width=True)
-
-    # ── 1.4 YEARLY BREAKDOWN ─────────────────────────────────────────────────
-    with v4:
+    # ── YEAR-BY-YEAR ──────────────────────────────────────────────────────────
+    with t4:
         st.subheader("Year-by-year deep dive")
+        yr_sel   = st.selectbox(
+            "Year",
+            sorted(yr_vals.keys(), reverse=True),
+            label_visibility="collapsed",
+        )
+        yr_str   = str(yr_sel)
+        yr_rbl   = [r for r in rebals if r['dt'].startswith(yr_str)]
+        yr_ret_v = float(yr_vals.get(yr_sel, 0))
+        yr_sells = [s for r in yr_rbl for s in r['sells']]
 
-        yr_sel = st.selectbox("Select year", sorted(yr_ret.keys(), reverse=True))
-        yr_str = str(yr_sel)
-        yr_rebals = [r for r in rebals if r['dt'].startswith(yr_str)]
-
-        if yr_rebals:
+        if yr_rbl:
             y1, y2, y3, y4 = st.columns(4)
-            yr_return = yr_ret.get(int(yr_sel), yr_ret.get(yr_sel, 0))
-            y1.metric(f"{yr_sel} Return", f"{yr_return:+.1f}%")
-            y2.metric("Rebalances", len(yr_rebals))
-            all_sells_yr = [s for r in yr_rebals for s in r['sells']]
-            y3.metric("Trades closed", len(all_sells_yr))
-            avg_to = sum(r['to'] for r in yr_rebals) / len(yr_rebals)
-            y4.metric("Avg turnover", f"{avg_to:.1f}%")
+            y1.metric(f"{yr_sel} return",  f"{yr_ret_v:+.1f}%")
+            y2.metric("Rebalances",         len(yr_rbl))
+            y3.metric("Trades closed",      len(yr_sells))
+            y4.metric("Avg turnover",       f"{sum(r['to'] for r in yr_rbl)/len(yr_rbl):.1f}%")
 
-            # Monthly breakdown (rebalance returns)
             fig5 = go.Figure(go.Bar(
-                x=[r['dt'][-5:] for r in yr_rebals],
-                y=[r['ret'] for r in yr_rebals],
-                marker_color=['#22d3a0' if r['ret'] >= 0 else '#f87171' for r in yr_rebals],
-                hovertemplate='%{x}<br>Return: %{y:+.2f}%<extra></extra>'
+                x=[r['dt'][-5:] for r in yr_rbl],
+                y=[r['ret'] for r in yr_rbl],
+                marker_color=['#059669' if r['ret'] >= 0 else '#dc2626' for r in yr_rbl],
+                hovertemplate='%{x}: %{y:+.2f}%<extra></extra>',
             ))
             fig5.update_layout(
-                title=f'{yr_sel} — Fortnightly returns', height=250,
-                plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-                font=dict(color='#94a3b8'), showlegend=False,
-                yaxis=dict(showgrid=True, gridcolor='#1f2937', ticksuffix='%'),
-                xaxis=dict(showgrid=False), margin=dict(l=10, r=10, t=40, b=10)
+                title=f'{yr_sel} — fortnightly period returns',
+                height=240, plot_bgcolor='white', paper_bgcolor='white',
+                font=dict(color='#374151'), showlegend=False,
+                yaxis=dict(showgrid=True, gridcolor='#f3f4f6', ticksuffix='%'),
+                xaxis=dict(showgrid=False),
+                margin=dict(l=10, r=10, t=40, b=10),
             )
             st.plotly_chart(fig5, use_container_width=True)
 
-            # Top stocks that appeared in this year
-            stock_appearances = {}
-            for r in yr_rebals:
+            stk_cnt = {}
+            for r in yr_rbl:
                 for t in (r['ents'] + r['hlds']):
-                    stock_appearances[t] = stock_appearances.get(t, 0) + 1
-            top_stocks = sorted(stock_appearances.items(), key=lambda x: x[1], reverse=True)[:15]
+                    stk_cnt[t] = stk_cnt.get(t, 0) + 1
+            top_stk = sorted(stk_cnt.items(), key=lambda x: x[1], reverse=True)[:12]
 
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown(f"**Most-held stocks in {yr_sel}**")
-                for s, cnt in top_stocks:
-                    bar_w = int(cnt / len(yr_rebals) * 100)
-                    st.markdown(f"""
-                    <div style="display:flex;align-items:center;gap:8px;margin:3px 0">
-                      <span style="min-width:90px;font-size:13px;font-weight:500">{s}</span>
-                      <div style="background:#22d3a0;height:8px;width:{bar_w}%;border-radius:4px;min-width:4px"></div>
-                      <span style="font-size:11px;color:#64748b">{cnt}/{len(yr_rebals)} periods</span>
-                    </div>""", unsafe_allow_html=True)
-
+                for s, cnt in top_stk:
+                    w = int(cnt / len(yr_rbl) * 100)
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
+                        f"<span style='min-width:100px;font-size:13px;font-weight:600;color:#1f2937'>{s}</span>"
+                        f"<div style='background:#2563eb;height:8px;width:{w}%;border-radius:4px;min-width:4px'></div>"
+                        f"<span style='font-size:11px;color:#6b7280'>{cnt}/{len(yr_rbl)}</span></div>",
+                        unsafe_allow_html=True,
+                    )
             with c2:
-                if all_sells_yr:
-                    sells_yr_df = pd.DataFrame(all_sells_yr)
-                    top_win = sells_yr_df[sells_yr_df['pct'] > 0].nlargest(5, 'pct')
-                    top_loss = sells_yr_df[sells_yr_df['pct'] <= 0].nsmallest(5, 'pct')
+                if yr_sells:
+                    best5  = sorted(yr_sells, key=lambda s: s['pct'], reverse=True)[:5]
+                    worst5 = sorted(yr_sells, key=lambda s: s['pct'])[:5]
                     st.markdown(f"**Best trades in {yr_sel}**")
-                    for _, row in top_win.iterrows():
-                        st.markdown(f"<div class='signal-enter'><strong>{row['t']}</strong> &nbsp; <span style='color:#22d3a0;font-weight:700'>+{row['pct']:.1f}%</span> &nbsp; <span style='font-size:11px;color:#64748b'>₹{row['pnl']:+,.0f}</span></div>", unsafe_allow_html=True)
+                    for s in best5:
+                        st.markdown(
+                            f"<div class='trade-win'><strong>{s['t']}</strong> · {s['days']}d · "
+                            f"<strong style='color:#059669'>{s['pct']:+.1f}% ₹{s['pnl']:+,.0f}</strong></div>",
+                            unsafe_allow_html=True,
+                        )
                     st.markdown(f"**Worst trades in {yr_sel}**")
-                    for _, row in top_loss.iterrows():
-                        st.markdown(f"<div class='signal-exit'><strong>{row['t']}</strong> &nbsp; <span style='color:#f87171;font-weight:700'>{row['pct']:.1f}%</span> &nbsp; <span style='font-size:11px;color:#64748b'>₹{row['pnl']:+,.0f}</span></div>", unsafe_allow_html=True)
+                    for s in worst5:
+                        st.markdown(
+                            f"<div class='trade-loss'><strong>{s['t']}</strong> · {s['days']}d · "
+                            f"<strong style='color:#dc2626'>{s['pct']:+.1f}% ₹{s['pnl']:+,.0f}</strong></div>",
+                            unsafe_allow_html=True,
+                        )
 
-    # ── 1.5 EXPORT ────────────────────────────────────────────────────────────
-    with v5:
+    # ── EXPORT ────────────────────────────────────────────────────────────────
+    with t5:
         st.subheader("Export backtest data")
 
-        # Build full trade CSV
-        all_sells_csv = []
+        sells_exp = []
         for r in rebals:
             for s in r['sells']:
-                all_sells_csv.append({
-                    'Rebal_Date': r['dt'], 'Exit_Date': s['xd'], 'Ticker': s['t'],
-                    'Entry_Date': s['ed'], 'Entry_Price': s['ep'],
-                    'Exit_Price': s['xp'], 'Shares': None, 'Return_Pct': s['pct'],
-                    'PnL_Rs': s['pnl'], 'Hold_Days': s['days'],
-                    'Portfolio_Value': r['vs']
+                sells_exp.append({
+                    'Rebal_Date':       r['dt'],
+                    'Exit_Date':        s['xd'],
+                    'Ticker':           s['t'],
+                    'Entry_Date':       s['ed'],
+                    'Entry_Price_Rs':   s['ep'],
+                    'Exit_Price_Rs':    s['xp'],
+                    'Return_Pct':       s['pct'],
+                    'PnL_Rs':           s['pnl'],
+                    'Hold_Days':        s['days'],
+                    'Portfolio_Value':  r['vs'],
                 })
+        sells_df = pd.DataFrame(sells_exp)
 
-        trade_csv_df = pd.DataFrame(all_sells_csv)
-
-        rebal_csv = pd.DataFrame([{
-            'Rebal_Date': r['dt'], 'Portfolio_Value': r['vs'],
-            'Period_Return_Pct': r['ret'], 'Entries': ';'.join(r['ents']),
-            'Exits': ';'.join(r['exts']), 'Holdings': ';'.join(r['hlds'] + r['ents']),
-            'N_Entries': r['ne'], 'N_Exits': r['nx'], 'Turnover_Pct': r['to']
+        rbl_exp = pd.DataFrame([{
+            'Rebal_Date':        r['dt'],
+            'Portfolio_Value_Rs':r['vs'],
+            'Period_Return_Pct': r['ret'],
+            'Stocks_Entered':    ';'.join(r['ents']),
+            'Stocks_Exited':     ';'.join(r['exts']),
+            'All_Holdings':      ';'.join(r['hlds'] + r['ents']),
+            'N_Entries':         r['ne'],
+            'N_Exits':           r['nx'],
+            'Turnover_Pct':      r['to'],
         } for r in rebals])
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Trade log (1,715 closed trades)**")
-            st.markdown("Every closed trade with entry date, exit date, entry price, exit price, P&L")
-            csv1 = trade_csv_df.to_csv(index=False)
-            st.download_button("⬇️ Download Trade Log CSV", csv1,
-                               "n250f_trade_log.csv", "text/csv", use_container_width=True)
+        summary = pd.DataFrame([
+            {'Metric': 'CAGR',               'Value': f"{perf['cagr_pct']}%"},
+            {'Metric': 'Total Return',        'Value': f"+{perf['total_return_pct']:.0f}%"},
+            {'Metric': 'Final Corpus',        'Value': f"₹{perf['final_corpus']/100000:.1f}L"},
+            {'Metric': 'Max Drawdown',        'Value': f"{perf['max_drawdown_pct']:.1f}%"},
+            {'Metric': 'Sharpe Ratio',        'Value': str(perf['sharpe'])},
+            {'Metric': 'Volatility',          'Value': f"{perf['volatility_pct']:.1f}%"},
+            {'Metric': 'Win Rate',            'Value': f"{perf['win_rate_pct']}%"},
+            {'Metric': 'Avg Win',             'Value': f"+{perf['avg_win_pct']:.2f}%"},
+            {'Metric': 'Avg Loss',            'Value': f"{perf['avg_loss_pct']:.2f}%"},
+            {'Metric': 'Payoff Ratio',        'Value': f"{abs(perf['avg_win_pct']/perf['avg_loss_pct']):.2f}x"},
+            {'Metric': 'Best Year',           'Value': f"+{best_yr_val:.1f}% ({best_yr_lbl})"},
+            {'Metric': 'Worst Year',          'Value': f"{worst_yr_val:.1f}% ({worst_yr_lbl})"},
+            {'Metric': 'Total Rebalances',    'Value': str(perf['total_rebalances'])},
+            {'Metric': 'Total Trades',        'Value': str(perf['total_trades'])},
+            {'Metric': 'Total Cost Paid',     'Value': f"₹{perf['total_cost_rs']/1000:.0f}K"},
+        ])
 
-        with col2:
-            st.markdown("**Rebalance log (258 rebalances)**")
-            st.markdown("Every rebalance: date, portfolio value, entries, exits, period return")
-            csv2 = rebal_csv.to_csv(index=False)
-            st.download_button("⬇️ Download Rebalance Log CSV", csv2,
-                               "n250f_rebalance_log.csv", "text/csv", use_container_width=True)
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            st.markdown(f"**Trade log ({len(sells_df)} records)**")
+            st.caption("Entry/exit date, prices, P&L per closed trade")
+            st.download_button("⬇️ Trade Log CSV", sells_df.to_csv(index=False),
+                               "N250F_Trade_Log.csv", "text/csv", use_container_width=True)
+        with e2:
+            st.markdown(f"**Rebalance log ({len(rbl_exp)} records)**")
+            st.caption("Every rebalance: entries, exits, portfolio value")
+            st.download_button("⬇️ Rebalance Log CSV", rbl_exp.to_csv(index=False),
+                               "N250F_Rebalance_Log.csv", "text/csv", use_container_width=True)
+        with e3:
+            st.markdown("**Performance summary**")
+            st.caption("All key metrics in one sheet")
+            st.download_button("⬇️ Summary CSV", summary.to_csv(index=False),
+                               "N250F_Performance.csv", "text/csv", use_container_width=True)
 
-        st.markdown("---")
-        # Performance summary
-        st.markdown("**Performance summary**")
-        summary_data = {
-            'Metric': ['CAGR', 'Total Return', 'Final Corpus (₹10L)', 'Max Drawdown', 'Sharpe Ratio',
-                       'Volatility', 'Win Rate', 'Avg Win', 'Avg Loss', 'Payoff Ratio',
-                       'Total Rebalances', 'Total Trades', 'Total Cost'],
-            'Value': [f"{perf['cagr_pct']}%", f"+{perf['total_return_pct']:.0f}%",
-                      f"₹{perf['final_corpus']/100000:.1f}L", f"{perf['max_drawdown_pct']:.1f}%",
-                      str(perf['sharpe']), f"{perf['volatility_pct']:.1f}%",
-                      f"{perf['win_rate_pct']}%", f"+{perf['avg_win_pct']:.2f}%",
-                      f"{perf['avg_loss_pct']:.2f}%",
-                      f"{abs(perf['avg_win_pct']/perf['avg_loss_pct']):.2f}x",
-                      str(perf['total_rebalances']), str(perf['total_trades']),
-                      f"₹{perf['total_cost_rs']/1000:.0f}K"],
-        }
-        summary_df = pd.DataFrame(summary_data)
-        csv3 = summary_df.to_csv(index=False)
-        st.download_button("⬇️ Download Performance Summary CSV", csv3,
-                           "n250f_performance.csv", "text/csv")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.divider()
+        st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2: LIVE TRACKER
+# SECTION 2 — LIVE TRACKER
 # ═══════════════════════════════════════════════════════════════════════════════
-with sec2_tab:
+with live_tab:
 
-    # ── NEXT REBALANCE COUNTDOWN ───────────────────────────────────────────────
-    next_rebal_dt = datetime.strptime(DATA['next_rebal'], '%Y-%m-%d')
-    today         = datetime.now()
-    days_to_rebal = (next_rebal_dt - today).days
+    # ── NEXT REBALANCE COUNTDOWN ──────────────────────────────────────────────
+    next_dt   = datetime.strptime(DATA['next_rebal'], '%Y-%m-%d')
+    today     = datetime.now()
+    days_left = (next_dt - today).days
 
-    r1, r2, r3 = st.columns([1, 2, 1])
-    with r2:
-        color = '#22d3a0' if days_to_rebal > 3 else '#fbbf24' if days_to_rebal > 0 else '#f87171'
-        urgency = "🟢 On Track" if days_to_rebal > 3 else "🟡 Approaching" if days_to_rebal > 0 else "🔴 DUE NOW"
+    _, rcol, _ = st.columns([1, 2, 1])
+    with rcol:
+        if days_left > 3:
+            urgency = "🟢 On track"
+            b_color = '#059669'
+        elif days_left >= 0:
+            urgency = "🟡 Approaching — prepare rankings"
+            b_color = '#f59e0b'
+        else:
+            urgency = "🔴 Due now — rebalance today"
+            b_color = '#dc2626'
+
         st.markdown(f"""
-        <div class="next-rebal-box" style="border-color:{color}40;background:rgba(0,0,0,0.3)">
-          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">Next Rebalance Date</div>
-          <div class="next-rebal-date" style="color:{color}">{next_rebal_dt.strftime('%d %B %Y')}</div>
-          <div style="font-size:14px;color:#94a3b8;margin-top:6px">{urgency} · {max(0,days_to_rebal)} days away</div>
-          <div style="font-size:11px;color:#475569;margin-top:6px">Check prices on this date, rank Nifty250 by 3-month return, rebalance top 20</div>
+        <div class="rebal-box" style="border-color:{b_color}">
+          <div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Next Rebalance Date</div>
+          <div class="rebal-date">{next_dt.strftime('%d %B %Y')}</div>
+          <div style="font-size:15px;color:#374151;margin-top:8px;font-weight:600">{urgency}</div>
+          <div style="font-size:12px;color:#6b7280;margin-top:4px">{max(0, days_left)} calendar days away</div>
+          <div style="font-size:11px;color:#9ca3af;margin-top:6px">
+            Action: Rank Nifty 250 by 63-day return → hold top 20 at equal weight (5% each)
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("---")
+    st.divider()
 
     # ── CURRENT HOLDINGS ──────────────────────────────────────────────────────
-    st.subheader("📌 Current portfolio (as of last rebalance)")
-
+    st.subheader("📌 Current portfolio — as of last rebalance")
     if curr:
-        curr_df = pd.DataFrame(curr)
-        curr_df = curr_df.sort_values('unrealised_pct', ascending=False)
-
-        # Summary
-        total_invested = sum(h['market_value'] for h in curr)
-        total_unreal   = sum(h['unrealised_pnl'] for h in curr)
-        winners_count  = sum(1 for h in curr if h['unrealised_pct'] > 0)
+        cdf       = pd.DataFrame(curr).sort_values('unrealised_pct', ascending=False)
+        total_mkt = cdf['market_value'].sum()
+        total_pnl = cdf['unrealised_pnl'].sum()
+        n_win     = (cdf['unrealised_pct'] > 0).sum()
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total market value", f"₹{total_invested/100000:.2f}L")
-        m2.metric("Unrealised P&L", f"₹{total_unreal/1000:.1f}K",
-                  delta=f"{total_unreal/total_invested*100:+.1f}%")
-        m3.metric("In profit", f"{winners_count}/20")
-        m4.metric("Cash balance", f"₹{rebals[-1]['cash'] if 'cash' in rebals[-1] else 'N/A'}")
+        m1.metric("Total market value", f"₹{total_mkt/100000:.2f}L")
+        m2.metric("Unrealised P&L",     f"₹{total_pnl/1000:.1f}K",
+                  f"{total_pnl/total_mkt*100:+.1f}%")
+        m3.metric("In profit",          f"{n_win}/20")
+        m4.metric("Last rebalance",     rebals[-1]['dt'])
 
-        # Holdings table
-        disp_curr = curr_df[['ticker','entry_date','entry_price','current_price','market_value','unrealised_pnl','unrealised_pct','weight_pct']].copy()
-        disp_curr.columns = ['Ticker','Entry Date','Entry ₹','Current ₹','Mkt Value ₹','Unreal P&L ₹','Unreal %','Weight %']
+        disp = cdf[['ticker','entry_date','entry_price','current_price',
+                     'market_value','unrealised_pnl','unrealised_pct','weight_pct']].copy()
+        disp.columns = ['Ticker','Entry Date','Entry ₹','Price ₹',
+                        'Mkt Val ₹','Unreal P&L ₹','Return %','Wt %']
         st.dataframe(
-            disp_curr,
-            use_container_width=True, hide_index=True, height=380,
+            disp, use_container_width=True, hide_index=True, height=420,
             column_config={
-                'Entry ₹': st.column_config.NumberColumn(format='₹%.2f'),
-                'Current ₹': st.column_config.NumberColumn(format='₹%.2f'),
-                'Mkt Value ₹': st.column_config.NumberColumn(format='₹%,.0f'),
+                'Entry ₹':      st.column_config.NumberColumn(format='₹%.2f'),
+                'Price ₹':      st.column_config.NumberColumn(format='₹%.2f'),
+                'Mkt Val ₹':    st.column_config.NumberColumn(format='₹%,.0f'),
                 'Unreal P&L ₹': st.column_config.NumberColumn(format='₹%+,.0f'),
-                'Unreal %': st.column_config.NumberColumn(format='%+.2f%%'),
-                'Weight %': st.column_config.NumberColumn(format='%.1f%%'),
-            }
+                'Return %':     st.column_config.NumberColumn(format='%+.2f%%'),
+                'Wt %':         st.column_config.NumberColumn(format='%.1f%%'),
+            },
         )
 
-        # Holdings chart
         fig6 = go.Figure(go.Bar(
-            x=curr_df['ticker'],
-            y=curr_df['unrealised_pct'],
-            marker_color=['#22d3a0' if v >= 0 else '#f87171' for v in curr_df['unrealised_pct']],
-            hovertemplate='%{x}<br>%{y:+.1f}%<extra></extra>'
+            x=cdf['ticker'], y=cdf['unrealised_pct'],
+            marker_color=['#059669' if v >= 0 else '#dc2626' for v in cdf['unrealised_pct']],
+            hovertemplate='%{x}: %{y:+.1f}%<extra></extra>',
         ))
-        fig6.add_hline(y=0, line_color='#475569', line_width=1)
+        fig6.add_hline(y=0, line_color='#6b7280', line_width=1)
         fig6.update_layout(
-            title='Current holdings — unrealised return per stock',
-            height=250, plot_bgcolor='#111827', paper_bgcolor='#0a0d13',
-            font=dict(color='#94a3b8'), showlegend=False,
-            yaxis=dict(showgrid=True, gridcolor='#1f2937', ticksuffix='%'),
-            xaxis=dict(showgrid=False, tickangle=-30), margin=dict(l=10, r=10, t=40, b=60)
+            title='Unrealised return per holding',
+            height=260, plot_bgcolor='white', paper_bgcolor='white',
+            font=dict(color='#374151'), showlegend=False,
+            yaxis=dict(showgrid=True, gridcolor='#f3f4f6', ticksuffix='%'),
+            xaxis=dict(showgrid=False, tickangle=-35),
+            margin=dict(l=10, r=10, t=40, b=60),
         )
         st.plotly_chart(fig6, use_container_width=True)
 
-    st.markdown("---")
+    st.divider()
 
     # ── NEXT REBALANCE SIGNALS ────────────────────────────────────────────────
-    st.subheader("🎯 Next rebalance signals (based on current momentum)")
-    st.caption("Based on 3-month return rankings as of last data pull. Verify on actual rebalance date.")
+    st.subheader("🎯 Likely changes at next rebalance")
+    st.caption(
+        f"Based on 3-month momentum as of {end_date_str}. "
+        f"Re-run rankings on {next_dt.strftime('%d %b %Y')} for final signals before trading."
+    )
 
     pot_entries = DATA.get('pot_entries', [])
-    pot_exits   = DATA.get('pot_exits', [])
-    top20       = DATA.get('top20', [])
+    pot_exits   = DATA.get('pot_exits',   [])
+    top20       = DATA.get('top20',       [])
 
-    sig_col1, sig_col2 = st.columns(2)
-
-    with sig_col1:
-        st.markdown("**🟢 Likely ENTRIES** (in top 20 today, not currently held)")
+    sig1, sig2 = st.columns(2)
+    with sig1:
+        st.markdown(f"**🟢 Likely ENTRIES — {len(pot_entries)} stocks**")
+        st.caption("In top-20 momentum, not currently held")
         if pot_entries:
             for e in pot_entries:
-                # Find in top20 list
-                t20 = next((x for x in top20 if x['ticker'] == e), None)
-                if t20:
-                    st.markdown(f"""
-                    <div class="signal-enter">
-                      <strong>{e}</strong> &nbsp;
-                      <span style="color:#22d3a0;font-weight:600">Rank #{t20['rank']}</span> &nbsp;
-                      <span style="color:#64748b;font-size:12px">3M: +{t20['mom_3m_pct']:.1f}%</span> &nbsp;
-                      <span style="color:#94a3b8;font-size:12px">₹{t20['current_price']:,.2f}</span>
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div class='signal-enter'><strong>{e}</strong></div>", unsafe_allow_html=True)
+                t20   = next((x for x in top20 if x['ticker'] == e), {})
+                rank  = t20.get('rank', '—')
+                mom   = t20.get('mom_3m_pct', 0)
+                price = t20.get('current_price', 0)
+                st.markdown(
+                    f"<div class='entry-sig'>"
+                    f"<strong>{e}</strong> &nbsp; Rank #{rank} &nbsp; "
+                    f"<span style='color:#059669;font-weight:600'>3M: +{mom:.1f}%</span> &nbsp; "
+                    f"<span style='color:#6b7280;font-size:12px'>₹{price:,.2f}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
         else:
-            st.success("No new entries — current portfolio matches top 20")
+            st.success("No new entries — portfolio already matches top 20")
 
-    with sig_col2:
-        st.markdown("**🔴 Likely EXITS** (currently held, slipped out of top 20)")
+    with sig2:
+        st.markdown(f"**🔴 Likely EXITS — {len(pot_exits)} stocks**")
+        st.caption("Held but slipped out of top-20 momentum ranking")
         if pot_exits:
             for x in pot_exits:
-                h = next((h for h in curr if h['ticker'] == x), None)
-                if h:
-                    st.markdown(f"""
-                    <div class="signal-exit">
-                      <strong>{x}</strong> &nbsp;
-                      <span style="color:#f87171;font-weight:600">{h['unrealised_pct']:+.1f}% unrealised</span><br>
-                      <span style="font-size:12px;color:#64748b">Entry ₹{h['entry_price']:,.2f} · Now ₹{h['current_price']:,.2f}</span>
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div class='signal-exit'><strong>{x}</strong></div>", unsafe_allow_html=True)
+                h     = next((h for h in curr if h['ticker'] == x), {})
+                upct  = h.get('unrealised_pct', 0)
+                epx   = h.get('entry_price', 0)
+                cpx   = h.get('current_price', 0)
+                st.markdown(
+                    f"<div class='exit-sig'>"
+                    f"<strong>{x}</strong> &nbsp; "
+                    f"<span style='color:#dc2626;font-weight:600'>{upct:+.1f}% unrealised</span><br>"
+                    f"<span style='font-size:12px;color:#6b7280'>Entry ₹{epx:,.2f} · Now ₹{cpx:,.2f}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
         else:
-            st.info("No exits flagged yet")
+            st.info("No exits flagged")
 
-    st.markdown("---")
+    st.divider()
 
-    # ── TODAY'S FULL TOP 20 RANKING ───────────────────────────────────────────
-    st.subheader("📊 Current Nifty250 momentum ranking — Top 20")
+    # ── TODAY'S TOP-20 RANKING ────────────────────────────────────────────────
+    st.subheader(f"📊 Nifty 250 momentum ranking — Top 20 (data: {end_date_str})")
     if top20:
-        top20_df = pd.DataFrame(top20)
-        top20_df['In Portfolio'] = top20_df['ticker'].apply(
-            lambda t: '✅ Holding' if t not in [e for e in pot_entries] else '🆕 Enter'
+        t20df = pd.DataFrame(top20)
+        t20df['Status'] = t20df['ticker'].apply(
+            lambda t: '🆕 Enter' if t in pot_entries else '✅ Hold'
         )
-        top20_df.columns = ['Rank', 'Ticker', '3M Return %', 'Price ₹', 'Status']
+        t20df.columns = ['Rank', 'Ticker', '3M Return %', 'Price ₹', 'Status']
         st.dataframe(
-            top20_df,
-            use_container_width=True, hide_index=True, height=360,
+            t20df, use_container_width=True, hide_index=True, height=360,
             column_config={
                 '3M Return %': st.column_config.NumberColumn(format='%+.1f%%'),
-                'Price ₹': st.column_config.NumberColumn(format='₹%.2f'),
-            }
+                'Price ₹':     st.column_config.NumberColumn(format='₹%.2f'),
+            },
         )
 
-    # ── REBALANCING SCHEDULE ──────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("📅 Upcoming rebalance schedule")
-    next_dates = []
-    base = next_rebal_dt
-    for i in range(6):
-        d = base + timedelta(days=14*i)
+    # ── FORWARD SCHEDULE ──────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📅 Upcoming rebalance schedule (next 8 periods)")
+    schedule = []
+    for i in range(8):
+        d = next_dt + timedelta(days=14 * i)
         while d.weekday() >= 5:
             d += timedelta(days=1)
-        next_dates.append({
-            'Rebalance #': i+1,
-            'Date': d.strftime('%d %b %Y'),
-            'Day': d.strftime('%A'),
-            'Action': 'DUE NOW ⚡' if i == 0 and days_to_rebal <= 0 else ('Upcoming 🗓️' if i < 3 else 'Future 📆')
+        dl = (d - today).days
+        if dl < 0:
+            status = '⚡ Due now'
+        elif dl == 0:
+            status = '⚡ Today'
+        elif i == 0:
+            status = '🟡 Next up'
+        else:
+            status = '📅 Scheduled'
+        schedule.append({
+            '#':       i + 1,
+            'Date':    d.strftime('%d %b %Y'),
+            'Day':     d.strftime('%A'),
+            'Days Away': max(0, dl),
+            'Status':  status,
         })
-    sched_df = pd.DataFrame(next_dates)
-    st.dataframe(sched_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
+    st.dataframe(pd.DataFrame(schedule), use_container_width=True, hide_index=True)
 
     # ── EXECUTION GUIDE ───────────────────────────────────────────────────────
-    with st.expander("📋 How to execute the rebalance — Step by step"):
+    with st.expander("📋 Step-by-step rebalance execution guide"):
         st.markdown(f"""
-        ### On {next_rebal_dt.strftime('%d %B %Y')} (rebalance day):
+**On {next_dt.strftime('%d %B %Y')} — what to do:**
 
-        **Step 1 — Download rankings**
-        - Pull Nifty 250 stock list and their closing prices for the past 63 trading days
-        - Rank by 3-month (63-day) price return, highest to lowest
-        - Take top 20 stocks
+**Step 1 — Pull momentum rankings**
+- Get closing prices for all Nifty 250 stocks
+- Calculate 63-trading-day return for each stock
+- Sort descending — top 20 are your target holdings
 
-        **Step 2 — Identify changes**
-        - Stocks in top 20 but NOT in your portfolio → **BUY**
-        - Stocks in your portfolio but NOT in top 20 → **SELL**
-        - Stocks in both → **HOLD** (rebalance to equal weight if significantly off)
+**Step 2 — Identify changes vs current portfolio**
+- Stocks in top-20 but NOT held → **BUY** at market open
+- Stocks held but NOT in top-20 → **SELL** at market open
+- Stocks in both → **HOLD** (adjust weight if drifted >2% from 5% target)
 
-        **Step 3 — Execute trades**
-        - Use market orders at market open (9:15 AM IST) or limit orders near open
-        - Target: equal weight = approximately {round(100/20, 1)}% each
-        - Use Zerodha/Groww for zero brokerage on delivery trades
-        - Cost budget: ~0.1% on each trade (brokerage + minor slippage)
+**Step 3 — Execute at market open (9:15 AM IST)**
+- Delivery trades (CNC), not intraday (MIS)
+- Target: ~5% weight per stock = equal weight across 20
+- Zero-brokerage broker (Zerodha/Groww) to keep cost <0.1%
 
-        **Step 4 — Tax note**
-        - Stocks held < 12 months → STCG at 15%
-        - Stocks held > 12 months → LTCG at 10% (above ₹1.25L annual threshold)
-        - Consider timing exits near the 12-month anniversary for LTCG benefit
+**Step 4 — Tax consideration**
+- Holdings < 12 months → STCG @ 15%
+- Holdings > 12 months → LTCG @ 10% (first ₹1.25L/year exempt)
+- If a holding is close to 12 months, defer exit a few days for LTCG benefit
 
-        **Step 5 — Record keeping**
-        - Log each trade: date, ticker, buy/sell, price, quantity
-        - AlphaRadar N250F tab auto-tracks all historical data
+**Step 5 — Log it**
+- Record each trade: date, ticker, buy/sell, price, qty
+- Never override the signal based on news or gut feel — the edge is in consistency
         """)
 
 # ── DISCLAIMER ────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="disclaimer">
-⚠️ <strong>BACKTEST DISCLAIMER:</strong> All results shown are from a backtest on real yfinance data for a proxy universe of 183 NSE stocks (2015–2025). 
-This is NOT a real trading account. Backtest results have inherent limitations: (1) Static universe — actual Nifty250 constituent changes not fully replicated; 
-(2) Survivorship bias — some delisted stocks absent from universe; (3) Slippage beyond 0.1% not modelled, especially for mid-cap stocks during rebalances; 
-(4) Tax impact (STCG/LTCG) not included in CAGR figures; (5) Past performance does not guarantee future results.
-Real-world CAGR after tax and realistic slippage: approximately 20–24%. This tool is for educational research only. Not SEBI investment advice.
+⚠️ <strong>DISCLAIMER:</strong> N250F backtest uses real yfinance prices for a 183-stock NSE proxy universe (Jun 2015 – May 2026).
+This is a research tool, not a real portfolio. Limitations: (1) Static universe — actual Nifty 250 constituent changes not fully replicated;
+(2) Minor survivorship bias — some delisted stocks absent; (3) Slippage beyond 0.1% not modelled for mid-caps;
+(4) STCG/LTCG tax not included in CAGR figures. Estimated post-tax, post-slippage CAGR: ~20–24%.
+Not SEBI investment advice. Past performance does not guarantee future results.
 </div>
 """, unsafe_allow_html=True)
