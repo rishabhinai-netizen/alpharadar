@@ -568,7 +568,33 @@ def main():
         for s in sorted(improving, key=lambda x: -x['composite_score'])[:8]:
             msg3 += f"▸ <b>{s['symbol']}</b> Score {s['composite_score']:.0f} · ₹{s['price']:.0f} · RS {s['rs_percentile']:.0f}%\n"
         send_telegram(msg3)
-    print(f"\n✅ Complete! {len(scores)} stocks, {elapsed:.1f} min")
+    print(f"\n✅ Scoring complete! {len(scores)} stocks, {elapsed:.1f} min")
+
+    # ── MARKET PULSE: compute and store daily breadth metrics ──
+    print("\n📡 Running Market Pulse engine…")
+    try:
+        from market_pulse_engine import run_market_pulse
+        pulse_summary = run_market_pulse()
+        if "error" not in pulse_summary:
+            adv = pulse_summary['advancing']
+            dec = pulse_summary['declining']
+            ad_r = round(adv/dec, 2) if dec else adv
+            pulse_msg = (
+                f"\n📡 <b>Market Pulse Updated — {today}</b>\n"
+                f"{pulse_summary['stocks_computed']} stocks computed\n\n"
+                f"{'🟢' if adv > dec else '🔴'} Advance/Decline: {adv}/{dec} (ratio {ad_r})\n"
+                f"📈 New 52W Highs: {pulse_summary['new_52w_highs']} | "
+                f"📉 Lows: {pulse_summary['new_52w_lows']}\n"
+                f"🚀 Stage 2: {pulse_summary['stage2_count']} | "
+                f"🔊 Vol Surges: {pulse_summary['vol_surges']}\n"
+                f"\n🔗 https://alpharadar.streamlit.app"
+            )
+            send_telegram(pulse_msg)
+            print(f"✅ Market Pulse: {pulse_summary['stocks_computed']} stocks written")
+        else:
+            print(f"⚠️ Market Pulse error: {pulse_summary['error']}")
+    except Exception as e:
+        print(f"⚠️ Market Pulse failed: {e}")
 
 if __name__ == '__main__':
     main()
