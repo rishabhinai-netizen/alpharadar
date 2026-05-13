@@ -8,4 +8,5 @@ breeze-connect>=1.0.40
 supabase>=2.0.0
 python-dotenv>=1.0.0
 yfinance>=0.2.40
-# cache-bust: 2026-05-12-market-pulse
+scipy>=1.11.0
+# cache-bust: 2026-05-13-scipy-fix

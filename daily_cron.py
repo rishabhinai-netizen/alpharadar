@@ -18,10 +18,10 @@ from collections import Counter
 from scipy.stats import percentileofscore, linregress
 
 # ── CONFIG ──
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://aiebaqvclyzxajigvkfd.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpZWJhcXZjbHl6eGFqaWd2a2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5NTg1MDQsImV4cCI6MjA5MDUzNDUwNH0.m_WLKdaKwEw82RRepHYhXp3tg-g0pwMiDKM2S7Y7XdY")
-TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8347009897:AAEFlJxNtRbWL7_grWDtQUludo_LCbhNgck")
-TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "705724053")
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
 BENCHMARK = "^NSEI"
 
 HEADERS = {

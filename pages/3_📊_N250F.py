@@ -23,7 +23,10 @@ except Exception as e:
     DATA_LOADED = False
     DATA_ERR = str(e)
 
-st.set_page_config(page_title="N250F — AlphaRadar", page_icon="📊", layout="wide")
+try:
+    st.set_page_config(page_title="N250F — AlphaRadar", page_icon="📊", layout="wide")
+except Exception:
+    pass
 
 # ── LIGHT THEME — matches AlphaRadar main page ────────────────────────────────
 st.markdown("""

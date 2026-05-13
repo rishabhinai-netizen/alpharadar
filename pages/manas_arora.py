@@ -29,11 +29,11 @@ except ImportError:
 # 0. PAGE CONFIG & STYLING
 # ─────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="Manas Arora — AlphaRadar",
-    page_icon="🎯",
-    layout="wide",
-)
+if __name__ == "__main__" or not hasattr(st, "_alpharadar_config_set"):
+    try:
+        st.set_page_config(page_title="Manas Arora — AlphaRadar", page_icon="🎯", layout="wide")
+    except Exception:
+        pass
 
 st.markdown("""
 <style>

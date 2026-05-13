@@ -30,9 +30,8 @@ def get_config():
         return st.secrets["supabase"]["url"], st.secrets["supabase"]["key"]
     except Exception:
         return (
-            os.environ.get("SUPABASE_URL", "https://aiebaqvclyzxajigvkfd.supabase.co"),
-            os.environ.get("SUPABASE_KEY",
-                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpZWJhcXZjbHl6eGFqaWd2a2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5NTg1MDQsImV4cCI6MjA5MDUzNDUwNH0.m_WLKdaKwEw82RRepHYhXp3tg-g0pwMiDKM2S7Y7XdY"),
+            os.environ["SUPABASE_URL"],
+            os.environ["SUPABASE_KEY"],
         )
 
 def sb_headers(key):

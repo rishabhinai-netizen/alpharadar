@@ -23,12 +23,15 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, date
 
-st.set_page_config(
-    page_title="Market Pulse — AlphaRadar",
-    page_icon="📡",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+try:
+    st.set_page_config(
+        page_title="Market Pulse — AlphaRadar",
+        page_icon="📡",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+except Exception:
+    pass
 
 st.markdown("""
 <style>
