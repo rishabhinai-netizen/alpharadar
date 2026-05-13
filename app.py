@@ -7,12 +7,20 @@ Single-URL, four-tab layout:
   ◎   Nifty Total Mkt — Weinstein/O'Neil/Minervini scoring (Supabase, daily cron)
   📡  Market Pulse     — NSE 1000 breadth engine (Supabase, daily cron)
 """
-import importlib.util
 import sys
 import os
 import streamlit as st
 
-# ── Page config — set once here, all sub-pages guard theirs with try/except ──
+# StopException: raised by st.stop() inside a sub-page.
+# We catch it so it only stops that tab's render, not the whole app.
+try:
+    from streamlit.runtime.scriptrunner import StopException
+except ImportError:
+    try:
+        from streamlit.runtime.scriptrunner.script_runner import StopException
+    except ImportError:
+        StopException = SystemExit  # safe fallback — should never reach this
+
 st.set_page_config(
     page_title="AlphaRadar",
     page_icon="◎",
@@ -20,24 +28,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Global light-theme CSS ────────────────────────────────────────────────────
 st.markdown("""
 <style>
   .stApp { background:#ffffff; }
   .main .block-container { padding:0.5rem 1.2rem 1.5rem; max-width:100%; }
-
-  /* Metrics */
   div[data-testid="stMetricValue"] { font-size:1.35rem; font-weight:700; color:#0f172a; }
   div[data-testid="stMetricLabel"] { font-size:0.71rem; color:#64748b; font-weight:500; }
-
-  /* Hide sidebar toggle & default page-nav */
   section[data-testid="stSidebar"] { display:none; }
   div[data-testid="collapsedControl"] { display:none; }
-
-  /* Tab strip styling */
-  div[data-testid="stTabs"] > div:first-child {
-    border-bottom:2px solid #e2e8f0; gap:0;
-  }
+  div[data-testid="stTabs"] > div:first-child { border-bottom:2px solid #e2e8f0; gap:0; }
   button[data-baseweb="tab"] {
     font-size:0.88rem; font-weight:600; color:#64748b;
     padding:10px 22px; border:none; border-bottom:3px solid transparent;
@@ -50,7 +49,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Brand header ──────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="display:flex;align-items:baseline;gap:14px;padding:4px 0 8px">
   <span style="font-size:1.45rem;font-weight:800;color:#0f172a;letter-spacing:-0.5px">◎ AlphaRadar</span>
@@ -60,22 +58,33 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
 
 def _run_page(relpath: str):
     """
-    Execute a page file inside the current tab context.
-    set_page_config calls in sub-pages are guarded with try/except so they
-    are silently skipped (config is already set above).
+    Execute a page file inside the current tab context via compile + exec.
+    No importlib module-naming restrictions. StopException is caught so
+    st.stop() in a sub-page only halts that tab, not the whole app.
     """
-    abs_path = os.path.join(os.path.dirname(__file__), relpath)
-    spec = importlib.util.spec_from_file_location("_ar_page", abs_path)
-    mod = importlib.util.module_from_spec(spec)
-    # Give the module a fresh __name__ so it doesn't collide with __main__
-    mod.__name__ = "_ar_page_" + relpath.replace("/","_").replace(".","_")
-    spec.loader.exec_module(mod)
+    abs_path = os.path.join(ROOT, relpath)
+    for p in [ROOT, os.path.dirname(abs_path)]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    try:
+        with open(abs_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        code = compile(source, abs_path, "exec")
+        exec(code, {"__file__": abs_path, "__name__": "__main__"})  # noqa: S102
+    except StopException:
+        pass  # st.stop() called — normal flow, just stop rendering this tab
+    except Exception as e:
+        st.error(f"⚠️ Error loading `{relpath}`:\n\n```\n{e}\n```")
+        import traceback
+        with st.expander("Full traceback"):
+            st.code(traceback.format_exc())
 
 
-# ── Four tabs ─────────────────────────────────────────────────────────────────
 tab_ma, tab_n250, tab_ntm, tab_mp = st.tabs([
     "🎯  Manas Arora",
     "📊  N250F",
