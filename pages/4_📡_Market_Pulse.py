@@ -214,7 +214,7 @@ with hc1:
     st.markdown("# 📡 Market Pulse")
     st.caption("NSE 1000 · Breadth · RS Rankings · Volume Intelligence · Updated daily 4:45 PM IST")
 with hc2:
-    if st.button("🔄 Refresh",use_container_width=True):
+    if st.button("🔄 Refresh",use_container_width=True, key="mp_refresh_btn"):
         st.cache_data.clear(); st.rerun()
 
 with st.spinner("Loading…"):
@@ -317,24 +317,24 @@ st.markdown('<p class="sec">📊 All Stocks — Full Dashboard Table</p>',unsafe
 
 with st.expander("⚙ Filters",expanded=True):
     fa,fb,fc,fd,fe,ff=st.columns(6)
-    with fa: srch=st.text_input("🔍 Search","",placeholder="Symbol / company",label_visibility="collapsed")
-    with fb: chg_p=st.selectbox("Change",["All","Up today","Down today","Up ≥2%","Down ≥2%","Up ≥5%","Down ≥5%"],label_visibility="collapsed")
-    with fc: stg_f=st.selectbox("Stage",["All","2A","1B","1A","3","4"],label_visibility="collapsed")
-    with fd: cap_f=st.selectbox("Cap",["All","large","mid","small","micro"],label_visibility="collapsed")
-    with fe: vol_f=st.selectbox("Volume",["All","≥1.5x avg","≥2x avg","≥3x avg"],label_visibility="collapsed")
-    with ff: rsi_f=st.selectbox("RSI",["All","Oversold <30","Neutral","Bullish","Overbought >70"],label_visibility="collapsed")
+    with fa: srch=st.text_input("🔍 Search","",placeholder="Symbol / company",label_visibility="collapsed",key="mp_search")
+    with fb: chg_p=st.selectbox("Change",["All","Up today","Down today","Up ≥2%","Down ≥2%","Up ≥5%","Down ≥5%"],label_visibility="collapsed",key="mp_chg")
+    with fc: stg_f=st.selectbox("Stage",["All","2A","1B","1A","3","4"],label_visibility="collapsed",key="mp_stage")
+    with fd: cap_f=st.selectbox("Cap",["All","large","mid","small","micro"],label_visibility="collapsed",key="mp_cap")
+    with fe: vol_f=st.selectbox("Volume",["All","≥1.5x avg","≥2x avg","≥3x avg"],label_visibility="collapsed",key="mp_vol")
+    with ff: rsi_f=st.selectbox("RSI",["All","Oversold <30","Neutral","Bullish","Overbought >70"],label_visibility="collapsed",key="mp_rsi")
     fg,fh,fi,fj=st.columns(4)
     with fg:
-        a200=st.checkbox("Above MA200")
-        s2o=st.checkbox("Stage 2 only")
+        a200=st.checkbox("Above MA200", key="mp_a200")
+        s2o=st.checkbox("Stage 2 only", key="mp_s2o")
     with fh:
-        min_rs=st.number_input("Min RS Spread%",value=None,step=1.,placeholder="e.g. 5.0",label_visibility="collapsed")
+        min_rs=st.number_input("Min RS Spread%",value=None,step=1.,placeholder="e.g. 5.0",label_visibility="collapsed",key="mp_minrs")
         st.caption("Min RS Spread%")
     with fi:
-        ath20=st.checkbox("Within 20% ATH")
-        mvo=st.checkbox("Minervini TT only")
+        ath20=st.checkbox("Within 20% ATH", key="mp_ath20")
+        mvo=st.checkbox("Minervini TT only", key="mp_mvo")
     with fj:
-        srt=st.selectbox("Sort",["Score ↓","RS Rank ↑","Chg% ↓","Chg% ↑","Vol Ratio ↓","RSI ↑","RSI ↓"])
+        srt=st.selectbox("Sort",["Score ↓","RS Rank ↑","Chg% ↓","Chg% ↑","Vol Ratio ↓","RSI ↑","RSI ↓"],key="mp_sort")
 
 fdf=df.copy()
 if srch:
@@ -486,7 +486,7 @@ st.divider()
 # ══════════════════════════════════════════════
 st.markdown('<p class="sec">🔬 Stock Deep-Dive</p>',unsafe_allow_html=True)
 sel=st.selectbox("Select stock",fdf["symbol"].tolist() if len(fdf) else df["symbol"].tolist(),
-                 label_visibility="collapsed")
+                 label_visibility="collapsed", key="mp_deepdive_sel")
 if sel:
     row=df[df.symbol==sel].iloc[0]
     c=st.columns(7)

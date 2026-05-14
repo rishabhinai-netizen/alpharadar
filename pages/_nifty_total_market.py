@@ -3,13 +3,19 @@ AlphaRadar — Nifty Total Market Scoring Dashboard
 ===================================================
 Weinstein Stage + O'Neil RS + Minervini Trend Template
 Reads from Supabase ar_daily_scores (written by daily cron / Run Scoring page).
+Live CMP + today's change refreshed via Breeze API (or yfinance fallback).
+
+Architecture note: The composite score (Stage, RS, VP, Fundamentals, Catalyst)
+requires weeks of OHLCV + fundamentals — it is genuinely an EOD calculation and
+cannot be "real-time". What IS live: CMP, today's % change, today's volume.
+The Refresh button pulls latest prices via Breeze and overlays them on the scores.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     st.set_page_config(page_title="Nifty Total Market — AlphaRadar", page_icon="◎", layout="wide")
@@ -25,6 +31,71 @@ def sb_get(table, select="*", params="", limit=1000):
     if params: url += "&" + params
     r = requests.get(url, headers=SB_HEADERS)
     return r.json() if r.status_code == 200 else []
+
+# ── Breeze live price overlay ──────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def get_breeze_ntm():
+    try:
+        from breeze_connect import BreezeConnect
+        b = BreezeConnect(api_key=st.secrets["BREEZE_API_KEY"])
+        b.generate_session(
+            api_secret=st.secrets["BREEZE_API_SECRET"],
+            session_token=st.secrets["BREEZE_SESSION_TOKEN"],
+        )
+        return b, None
+    except Exception as e:
+        return None, str(e)
+
+@st.cache_data(ttl=60, show_spinner=False)   # 60-second cache for live prices
+def fetch_live_prices_breeze(symbols: tuple) -> dict:
+    """Fetch LTP + prev_close from Breeze for a list of symbols. Returns {sym: {cmp, chg_pct}}"""
+    breeze, err = get_breeze_ntm()
+    if err or not breeze:
+        return {}
+    result = {}
+    for sym in symbols[:200]:  # cap at 200 to avoid timeout
+        try:
+            resp = breeze.get_quotes(
+                stock_code=sym, exchange_code="NSE",
+                product_type="cash", expiry_date="", right="", strike_price=""
+            )
+            if resp and resp.get("Success"):
+                d = resp["Success"][0]
+                ltp  = float(d.get("last_rate", 0) or 0)
+                prev = float(d.get("previous_close", 0) or 0)
+                if ltp > 0 and prev > 0:
+                    result[sym] = {
+                        "cmp_live":     round(ltp, 2),
+                        "chg_pct_live": round((ltp - prev) / prev * 100, 2),
+                    }
+        except Exception:
+            continue
+    return result
+
+@st.cache_data(ttl=60, show_spinner=False)   # fallback via yfinance
+def fetch_live_prices_yf(symbols: tuple) -> dict:
+    try:
+        import yfinance as yf
+        tickers = [s + ".NS" for s in symbols[:200]]
+        raw = yf.download(tickers, period="2d", auto_adjust=True,
+                          progress=False, group_by="ticker")
+        result = {}
+        if isinstance(raw.columns, pd.MultiIndex):
+            for sym, ts in zip(symbols[:200], tickers):
+                try:
+                    sub = raw[ts]["Close"].dropna()
+                    if len(sub) >= 2:
+                        cmp = float(sub.iloc[-1])
+                        prev = float(sub.iloc[-2])
+                        result[sym] = {
+                            "cmp_live":     round(cmp, 2),
+                            "chg_pct_live": round((cmp - prev) / prev * 100, 2),
+                        }
+                except Exception:
+                    continue
+        return result
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=300)
 def load_scores():
@@ -57,6 +128,11 @@ c1, c2 = st.columns([3, 1])
 with c1:
     st.markdown("## ◎ Nifty Total Market — Scoring Dashboard")
     st.caption("Weinstein Stage Analysis · O'Neil Relative Strength · Minervini Trend Template")
+    st.caption(
+        "ℹ️ **Score** (Stage/RS/VP/Fundamentals) = EOD calculation, updated daily 4:45 PM. "
+        "**CMP + Today's Change** = Live via Breeze (click Refresh ↑). "
+        "Run Scoring page re-runs the full engine manually."
+    )
 with c2:
     if not df.empty:
         days_old = (datetime.now() - datetime.strptime(score_date, "%Y-%m-%d")).days
@@ -64,6 +140,26 @@ with c2:
         if days_old == 0:   st.caption(f"📅 {score_date} (today)")
         elif days_old == 1: st.caption(f"📅 {score_date} (yesterday)")
         else:               st.caption(f"⚠️ {score_date} ({days_old} days old)")
+    if st.button("🔄 Refresh Live Prices", use_container_width=True, key="ntm_refresh"):
+        st.cache_data.clear()
+        st.rerun()
+
+# ── LIVE PRICE OVERLAY ─────────────────────────────────────────────────────────
+if not df.empty and "symbol" in df.columns:
+    syms = tuple(df["symbol"].tolist())
+    live_prices = fetch_live_prices_breeze(syms)
+    if not live_prices:
+        live_prices = fetch_live_prices_yf(syms)
+    if live_prices:
+        df["cmp_live"]     = df["symbol"].map(lambda s: live_prices.get(s, {}).get("cmp_live", None))
+        df["chg_pct_live"] = df["symbol"].map(lambda s: live_prices.get(s, {}).get("chg_pct_live", None))
+        # Use live where available, fall back to stored
+        if "price" in df.columns:
+            df["price"]           = df["cmp_live"].fillna(df["price"])
+        if "price_change_pct" in df.columns:
+            df["price_change_pct"] = df["chg_pct_live"].fillna(df["price_change_pct"])
+        live_count = len([v for v in live_prices.values() if v])
+        st.caption(f"⚡ Live prices loaded for **{live_count}** stocks via {'Breeze' if live_prices else 'yfinance'}")
 
 if df.empty:
     st.error("No scores in database.")
@@ -130,11 +226,11 @@ if "stage_changed" in df.columns and "weinstein_stage" in df.columns:
 
 # ── FILTERS ──
 fc1, fc2, fc3, fc4, fc5 = st.columns([2.5, 1, 1, 1, 1])
-with fc1: search = st.text_input("Search", "", placeholder="Symbol or company...", label_visibility="collapsed")
-with fc2: bf = st.selectbox("Bucket", ["All"] + list(BCFG.keys()), label_visibility="collapsed")
-with fc3: sf = st.selectbox("Stage", ["All","2A","2B","1B","1A","3","4"], label_visibility="collapsed")
-with fc4: cf = st.selectbox("Cap", ["All","large","mid","small","micro"], label_visibility="collapsed")
-with fc5: sort = st.selectbox("Sort", ["Score ↓","RS% ↓","Chg% ↓","Score ↑"], label_visibility="collapsed")
+with fc1: search = st.text_input("Search", "", placeholder="Symbol or company...", label_visibility="collapsed", key="ntm_search")
+with fc2: bf = st.selectbox("Bucket", ["All"] + list(BCFG.keys()), label_visibility="collapsed", key="ntm_bucket")
+with fc3: sf = st.selectbox("Stage", ["All","2A","2B","1B","1A","3","4"], label_visibility="collapsed", key="ntm_stage")
+with fc4: cf = st.selectbox("Cap", ["All","large","mid","small","micro"], label_visibility="collapsed", key="ntm_cap")
+with fc5: sort = st.selectbox("Sort", ["Score ↓","RS% ↓","Chg% ↓","Score ↑"], label_visibility="collapsed", key="ntm_sort")
 
 fdf = df.copy()
 if search:

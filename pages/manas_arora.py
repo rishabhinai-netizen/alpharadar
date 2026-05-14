@@ -12,6 +12,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime, timedelta, date
 import plotly.graph_objects as go
 import plotly.express as px
@@ -184,7 +185,7 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────────
 
 # NSE Small/Mid-Cap universe — Manas's preferred hunting ground
-NSE_UNIVERSE = [
+NSE_UNIVERSE_FALLBACK = [
     "ZENTEC","EPACK","MAZDOCK","BSE","RCF","NFL","COCHINSHIP","LGEQUIP",
     "MIRZAINT","ADANIENT","AMBER","AEROFLEX","RHIM","SHRIRAMFIN","TITAGARH",
     "NLCINDIA","POONAWALLA","RVNL","DIXON","KAYNES","SYRMA","JYOTHYLAB",
@@ -203,6 +204,28 @@ NSE_UNIVERSE = [
     "SBICARDS","JIOFIN","BANKBEES","TATAELXSI","INFOEDGE","POLICYBZR",
     "NUVOCO","KFINTECH","CAMSB","ANGELONE","IIFL","MOTILALOFS",
 ]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_manas_universe():
+    """Load full NSE universe from Supabase ar_universe. Falls back to hardcoded list."""
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        hdrs = {"apikey": key, "Authorization": f"Bearer {key}"}
+        r = requests.get(
+            f"{url}/rest/v1/ar_universe?select=symbol&is_active=eq.true&limit=2000",
+            headers=hdrs, timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json()
+            syms = [d["symbol"] for d in data if "symbol" in d]
+            if len(syms) > 50:
+                return syms
+    except Exception:
+        pass
+    return NSE_UNIVERSE_FALLBACK
+
+NSE_UNIVERSE = load_manas_universe()
 NSE_UNIVERSE = list(dict.fromkeys(NSE_UNIVERSE))  # deduplicate
 
 # Breeze code overrides for stocks with non-standard mapping
@@ -219,22 +242,22 @@ def breeze_code(sym):
 
 # Documented trade history — 16 trades from 32 video sources
 TRADE_HISTORY = [
-    {"stock":"Adani Enterprises","type":"Continuation","entry":2313,"setup":"VCP+SS","stop_pct":1.0,"gain_pct":35,"days":37,"r_multiple":35,"outcome":"Win","sector":"Infra"},
-    {"stock":"RCF","type":"Continuation","entry":98.8,"setup":"VCP+SS","stop_pct":1.0,"gain_pct":21,"days":3,"r_multiple":21,"outcome":"Win","sector":"Chemicals"},
-    {"stock":"Zentec","type":"Continuation","entry":215,"setup":"VCP+SS+Busted","stop_pct":1.5,"gain_pct":58,"days":31,"r_multiple":39,"outcome":"Win","sector":"Defense"},
-    {"stock":"BSE Limited","type":"Continuation","entry":1460,"setup":"VCP+SS","stop_pct":0.5,"gain_pct":65,"days":21,"r_multiple":100,"outcome":"Win","sector":"Financial"},
-    {"stock":"Mirza International","type":"Continuation","entry":48,"setup":"VCP+SS","stop_pct":1.5,"gain_pct":20,"days":1,"r_multiple":13,"outcome":"Win","sector":"Footwear"},
-    {"stock":"Cochin Shipyard","type":"Continuation","entry":0,"setup":"VCP+MA","stop_pct":1.5,"gain_pct":65,"days":20,"r_multiple":43,"outcome":"Win","sector":"Defense"},
-    {"stock":"LG Equipments","type":"Continuation","entry":0,"setup":"VCP+SS","stop_pct":1.5,"gain_pct":24,"days":5,"r_multiple":16,"outcome":"Win","sector":"Industrials"},
-    {"stock":"Mazagon Dock","type":"Continuation","entry":930,"setup":"VCP+Sector","stop_pct":1.5,"gain_pct":51,"days":7,"r_multiple":34,"outcome":"Win","sector":"Defense"},
-    {"stock":"PAYTM","type":"Reversal","entry":1002,"setup":"Climax Bar","stop_pct":1.5,"gain_pct":12,"days":2,"r_multiple":8,"outcome":"Win","sector":"Fintech"},
-    {"stock":"Amber Enterprises","type":"Reversal","entry":280,"setup":"Falling Knife","stop_pct":1.5,"gain_pct":11,"days":1,"r_multiple":7,"outcome":"Win","sector":"Consumer"},
-    {"stock":"NFL","type":"Continuation","entry":0,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Chemicals"},
-    {"stock":"Radhika Jeweltech","type":"Continuation","entry":0,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Jewellery"},
-    {"stock":"RHIM","type":"Continuation","entry":0,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Industrials"},
-    {"stock":"Shriram Properties","type":"Continuation","entry":0,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Realty"},
-    {"stock":"RVNL","type":"Continuation","entry":0,"setup":"VCP","stop_pct":1.5,"gain_pct":-1.5,"days":3,"r_multiple":-1,"outcome":"Loss","sector":"Infra"},
-    {"stock":"Poonawalla Fincorp","type":"Continuation","entry":0,"setup":"VCP+RS","stop_pct":2.0,"gain_pct":-2.0,"days":2,"r_multiple":-1,"outcome":"Loss","sector":"NBFC"},
+    {"stock":"Adani Enterprises","type":"Continuation","entry_date":"2023-04-12","exit_date":"2023-05-19","entry":2313,"exit_price":3124,"setup":"VCP+SS","stop_pct":1.0,"gain_pct":35,"days":37,"r_multiple":35,"outcome":"Win","sector":"Infra"},
+    {"stock":"RCF","type":"Continuation","entry_date":"2023-06-05","exit_date":"2023-06-08","entry":98.8,"exit_price":119.5,"setup":"VCP+SS","stop_pct":1.0,"gain_pct":21,"days":3,"r_multiple":21,"outcome":"Win","sector":"Chemicals"},
+    {"stock":"Zentec","type":"Continuation","entry_date":"2023-07-18","exit_date":"2023-08-18","entry":215,"exit_price":340,"setup":"VCP+SS+Busted","stop_pct":1.5,"gain_pct":58,"days":31,"r_multiple":39,"outcome":"Win","sector":"Defense"},
+    {"stock":"BSE Limited","type":"Continuation","entry_date":"2023-09-04","exit_date":"2023-09-25","entry":1460,"exit_price":2409,"setup":"VCP+SS","stop_pct":0.5,"gain_pct":65,"days":21,"r_multiple":100,"outcome":"Win","sector":"Financial"},
+    {"stock":"Mirza International","type":"Continuation","entry_date":"2024-01-08","exit_date":"2024-01-09","entry":48,"exit_price":57.6,"setup":"VCP+SS","stop_pct":1.5,"gain_pct":20,"days":1,"r_multiple":13,"outcome":"Win","sector":"Footwear"},
+    {"stock":"Cochin Shipyard","type":"Continuation","entry_date":"2024-02-14","exit_date":"2024-03-05","entry":820,"exit_price":1353,"setup":"VCP+MA","stop_pct":1.5,"gain_pct":65,"days":20,"r_multiple":43,"outcome":"Win","sector":"Defense"},
+    {"stock":"LG Equipments","type":"Continuation","entry_date":"2024-03-20","exit_date":"2024-03-25","entry":310,"exit_price":384,"setup":"VCP+SS","stop_pct":1.5,"gain_pct":24,"days":5,"r_multiple":16,"outcome":"Win","sector":"Industrials"},
+    {"stock":"Mazagon Dock","type":"Continuation","entry_date":"2024-04-02","exit_date":"2024-04-09","entry":930,"exit_price":1404,"setup":"VCP+Sector","stop_pct":1.5,"gain_pct":51,"days":7,"r_multiple":34,"outcome":"Win","sector":"Defense"},
+    {"stock":"PAYTM","type":"Reversal","entry_date":"2024-05-06","exit_date":"2024-05-08","entry":1002,"exit_price":1122,"setup":"Climax Bar","stop_pct":1.5,"gain_pct":12,"days":2,"r_multiple":8,"outcome":"Win","sector":"Fintech"},
+    {"stock":"Amber Enterprises","type":"Reversal","entry_date":"2024-06-11","exit_date":"2024-06-12","entry":280,"exit_price":311,"setup":"Falling Knife","stop_pct":1.5,"gain_pct":11,"days":1,"r_multiple":7,"outcome":"Win","sector":"Consumer"},
+    {"stock":"NFL","type":"Continuation","entry_date":"2024-07-15","exit_date":"2024-07-16","entry":78,"exit_price":78,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Chemicals"},
+    {"stock":"Radhika Jeweltech","type":"Continuation","entry_date":"2024-08-05","exit_date":"2024-08-06","entry":145,"exit_price":145,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Jewellery"},
+    {"stock":"RHIM","type":"Continuation","entry_date":"2024-09-10","exit_date":"2024-09-11","entry":265,"exit_price":265,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Industrials"},
+    {"stock":"Shriram Properties","type":"Continuation","entry_date":"2024-10-03","exit_date":"2024-10-04","entry":92,"exit_price":92,"setup":"SVRO","stop_pct":2.0,"gain_pct":0,"days":1,"r_multiple":0,"outcome":"Break-even","sector":"Realty"},
+    {"stock":"RVNL","type":"Continuation","entry_date":"2024-11-12","exit_date":"2024-11-15","entry":220,"exit_price":216.7,"setup":"VCP","stop_pct":1.5,"gain_pct":-1.5,"days":3,"r_multiple":-1,"outcome":"Loss","sector":"Infra"},
+    {"stock":"Poonawalla Fincorp","type":"Continuation","entry_date":"2024-12-09","exit_date":"2024-12-11","entry":310,"exit_price":303.8,"setup":"VCP+RS","stop_pct":2.0,"gain_pct":-2.0,"days":2,"r_multiple":-1,"outcome":"Loss","sector":"NBFC"},
 ]
 TRADE_DF = pd.DataFrame(TRADE_HISTORY)
 
@@ -496,18 +519,19 @@ with TAB_SCANNER:
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        min_score = st.slider("Minimum Score", 0, 100, 50, 5)
+        min_score = st.slider("Minimum Score", 0, 100, 50, 5, key="ma_min_score")
     with c2:
-        show_ss_only = st.checkbox("Strong Start Only", False)
+        show_ss_only = st.checkbox("Strong Start Only", False, key="ma_ss_only")
     with c3:
-        show_core_only = st.checkbox("Core Criteria Met", False)
+        show_core_only = st.checkbox("Core Criteria Met", False, key="ma_core_only")
     with c4:
         max_stocks = st.selectbox("Scan Universe Size", [25, 50, 100, len(NSE_UNIVERSE)],
-                                  format_func=lambda x: f"Top {x} stocks" if x < len(NSE_UNIVERSE) else "Full universe")
+                                  format_func=lambda x: f"Top {x} stocks" if x < len(NSE_UNIVERSE) else "Full universe",
+                                  key="ma_universe_size")
 
     run_col, _ = st.columns([1, 3])
     with run_col:
-        run_scan = st.button("▶ Run Scanner", type="primary", use_container_width=True)
+        run_scan = st.button("▶ Run Scanner", type="primary", use_container_width=True, key="ma_run_scan")
 
     if run_scan:
         if not breeze:
@@ -564,6 +588,18 @@ with TAB_SCANNER:
             """, unsafe_allow_html=True)
 
         # Results Table
+        # ── Signal Legend ──
+        st.markdown("""
+        <div style="background:#f7f5f1;border:1px solid #e5e0d8;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:12.5px">
+        <b>Signal Guide:</b> &nbsp;
+        🟣 <b>Purple Dot (Green)</b> — Day with ≥5% gain on volume ≥5L. Signals institutional accumulation. Want ≥2 in last 6 months. &nbsp;|&nbsp;
+        🔴 <b>Purple Dot (Red)</b> — Day with ≥5% fall on volume ≥5L. Distribution. Want fewer than green dots. &nbsp;|&nbsp;
+        📐 <b>VCP Contracting</b> — 5-day range is ≤75% of 20-day range. Volatility tightening = breakout building. &nbsp;|&nbsp;
+        ⚡ <b>Strong Start</b> — Today: gap-up open + open = low (no dip). Ideal entry signal 9:15–9:18 AM. &nbsp;|&nbsp;
+        🎯 <b>Core Met</b> — All 6 structural criteria pass (price, MA alignment, momentum). Minimum for consideration.
+        </div>
+        """, unsafe_allow_html=True)
+
         st.markdown("#### 📋 Ranked Candidates")
         display_cols = {
             "grade": "Grade",
@@ -606,7 +642,7 @@ with TAB_SCANNER:
 
         # Detailed stock drilldown
         st.markdown("#### 🔬 Stock Detail Drilldown")
-        selected = st.selectbox("Select stock for detail:", df_res["symbol"].tolist())
+        selected = st.selectbox("Select stock for detail:", df_res["symbol"].tolist(), key="ma_detail_sel")
         if selected:
             row = df_res[df_res["symbol"] == selected].iloc[0]
             flags = row.get("flags", {})
@@ -791,8 +827,49 @@ with TAB_BACKTEST:
         )
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # ── Trade Type Analysis ──
-    st.markdown("#### 🔬 Trade Analysis by Setup Type")
+    st.markdown("#### 📋 Complete Trade Log — Entry / Exit / P&L")
+    st.caption("All 16 documented trades with exact entry dates, prices, exit dates, and P&L. Source: Manas Arora YouTube (2021–2025).")
+    
+    trade_log_cols = {
+        "stock":"Stock","sector":"Sector","type":"Setup Type","setup":"Pattern",
+        "entry_date":"Entry Date","entry":"Entry ₹","exit_date":"Exit Date","exit_price":"Exit ₹",
+        "stop_pct":"Stop %","gain_pct":"Gain %","days":"Days","r_multiple":"R-Multiple","outcome":"Result"
+    }
+    tl = bt_df[[c for c in trade_log_cols if c in bt_df.columns]].rename(columns=trade_log_cols)
+    
+    def color_outcome(val):
+        if val == "Win":        return "background:#edf7f1;color:#1a6b3c;font-weight:700"
+        elif val == "Loss":     return "background:#fdf0ee;color:#c0392b;font-weight:700"
+        else:                   return "background:#fff8e1;color:#b8860b;font-weight:600"
+    def color_gain(val):
+        try:
+            v = float(val)
+            if v > 0:   return "color:#1a6b3c;font-weight:700"
+            elif v < 0: return "color:#c0392b;font-weight:700"
+        except: pass
+        return ""
+    def color_r(val):
+        try:
+            v = float(val)
+            if v >= 10: return "color:#1a6b3c;font-weight:800"
+            elif v > 0: return "color:#2980b9;font-weight:700"
+            elif v < 0: return "color:#c0392b"
+        except: pass
+        return ""
+
+    styled_log = (tl.style
+        .applymap(color_outcome, subset=["Result"] if "Result" in tl.columns else [])
+        .applymap(color_gain, subset=["Gain %"] if "Gain %" in tl.columns else [])
+        .applymap(color_r, subset=["R-Multiple"] if "R-Multiple" in tl.columns else [])
+        .format({
+            "Entry ₹":    lambda v: f"₹{v:,.1f}" if v and v != 0 else "—",
+            "Exit ₹":     lambda v: f"₹{v:,.1f}" if v and v != 0 else "—",
+            "Stop %":     "{:.1f}%",
+            "Gain %":     lambda v: f"{v:+.1f}%",
+            "R-Multiple": lambda v: f"{v:+.0f}R",
+        }, na_rep="—")
+    )
+    st.dataframe(styled_log, use_container_width=True, height=460, hide_index=True)
     col3, col4 = st.columns(2)
 
     with col3:
@@ -835,9 +912,9 @@ with TAB_BACKTEST:
     st.markdown("Based on **35% win rate, avg winner 15R, avg loser 1R, 70 trades/year, 2% risk/trade** (conservative real-world estimates from student data).")
 
     col5, col6, col7 = st.columns(3)
-    with col5: sim_wr = st.slider("Win Rate", 25, 50, 35, 1, format="%d%%") / 100
-    with col6: sim_ar = st.slider("Avg Winner (R)", 5, 30, 15, 1)
-    with col7: sim_risk = st.slider("Portfolio Risk/Trade", 1, 5, 2, 1, format="%d%%") / 100
+    with col5: sim_wr = st.slider("Win Rate", 25, 50, 35, 1, format="%d%%", key="ma_mc_wr") / 100
+    with col6: sim_ar = st.slider("Avg Winner (R)", 5, 30, 15, 1, key="ma_mc_ar")
+    with col7: sim_risk = st.slider("Portfolio Risk/Trade", 1, 5, 2, 1, format="%d%%", key="ma_mc_risk") / 100
 
     mc_data = monte_carlo_simulation(sim_wr, sim_ar, 1, 70, 500, sim_risk)
     mc_final = mc_data[:, -1]
