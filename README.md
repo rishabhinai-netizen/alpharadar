@@ -16,9 +16,32 @@ The key innovation: Stage isn't just a weight — it's a filter.
 - Stage 3 stocks are **capped at 40**
 - This prevents buying declining stocks that "look cheap"
 
+## Pages
+
+| Page | Description |
+|------|-------------|
+| ⚡ Run Scoring | Full scoring pipeline — run weekly or daily |
+| 📊 N250F | Nifty 250 F&O watchlist |
+| 📡 Market Pulse | Market breadth and sector rotation |
+| 🏆 N500 Strength Ranker | **NEW** — Ranks all Nifty 500 stocks strongest to weakest with live CMP, multi-timeframe returns, signal tags (RS Leader / Breakout / Stage 2 / News-Driven⚑ / Vol Surge / Weak), and Claude AI one-line justification per stock |
+
+## Secrets required (Streamlit Cloud)
+
+```toml
+[supabase]
+url = "https://aiebaqvclyzxajigvkfd.supabase.co"
+key = "your-supabase-anon-key"
+
+BREEZE_API_KEY      = "your-icici-direct-api-key"
+BREEZE_API_SECRET   = "your-icici-direct-api-secret"
+BREEZE_SESSION_TOKEN = "daily-session-token"   # refresh every morning
+
+ANTHROPIC_API_KEY   = "sk-ant-..."             # for AI justifications on N500 Ranker
+```
+
 ## Deployment
 
-Deployed on Streamlit Cloud with Supabase backend.
+Deployed on Streamlit Cloud with Supabase backend (`aiebaqvclyzxajigvkfd`).
 
 ## Accuracy
 
