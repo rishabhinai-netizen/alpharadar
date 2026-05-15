@@ -1,119 +1,154 @@
 """
-AlphaRadar — Nifty 500 Strength Ranker
-=======================================
-Ranks all Nifty 500 stocks from strongest to weakest using:
-  • Breeze API  → live CMP + 1D return (real-time during market hours)
-  • Supabase    → OHLCV history for 1W / 1M / 3M / 1Y returns
-  • Scoring     → RS percentile, Stage, Volume pattern, Breakout flags
-  • Claude API  → one-line signal justification per stock
-  • Signal tags → RS Leader | Breakout | Stage-2 | News-Driven⚑ | Vol-Surge | Weak
+AlphaRadar — Nifty 500 Strength Ranker  (v2 — fast, self-contained)
+=====================================================================
+• No ar_daily_ohlcv dependency  (empty table — uses ar_daily_scores directly)
+• Loads in ~2 seconds           (single Supabase query, 746 rows)
+• Breeze live CMP               (optional — runs async, doesn't block page load)
+• Multi-period returns          (1D from Breeze; 1W/1M/3M/1Y from price_change_pct
+                                 + score history deltas stored in ar_daily_scores)
+• Signal tags                   (RS Leader | Breakout | Stage 2 | News-Driven⚑ |
+                                 Vol Surge | Weak | Extended)
+• Grade S/A/B/C with one-line Claude AI justification (top 100 stocks, batched)
+• Sector heatmap
+• CSV export
 """
 
-import math
-import time
-import json
-import requests
+import json, math, time, requests
 import numpy as np
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta
-import sys, os
+from datetime import datetime
 
-# ── Breeze ─────────────────────────────────────────────────────────────────
+# ── Breeze ──────────────────────────────────────────────────────────────────
 try:
     from breeze_connect import BreezeConnect
     BREEZE_OK = True
 except ImportError:
     BREEZE_OK = False
 
-# ── Constants ───────────────────────────────────────────────────────────────
+# ── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = st.secrets["supabase"]["url"]
 SUPABASE_KEY = st.secrets["supabase"]["key"]
-SB_HEADERS = {
+SB_H = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
 }
 
 BREEZE_MAP = {
-    "MAZDOCK":    "MAZDOC",
-    "COCHINSHIP": "COCHIN",
-    "LGEQUIP":    "LGEQU",
-    "MIRZAINT":   "MIRZAI",
-    "ADANIENT":   "ADANIENS",
-    "M&M":        "M&M",
-    "M&MFIN":     "M&MFIN",
+    "MAZDOCK": "MAZDOC", "COCHINSHIP": "COCHIN", "LGEQUIP": "LGEQU",
+    "MIRZAINT": "MIRZAI", "ADANIENT": "ADANIENS",
 }
 
-SIGNAL_COLORS = {
-    "RS Leader":    ("#dceeff", "#0c3d7a"),
-    "Breakout":     ("#d4f0e0", "#0f5c2e"),
-    "Stage 2":      ("#e8d4f0", "#4a0f7a"),
-    "News-Driven⚑": ("#fff3cd", "#7a4f00"),
-    "Vol Surge":    ("#d4eaf0", "#0f4a5c"),
-    "Weak":         ("#fde8e8", "#7a1f1f"),
-    "Neutral":      ("#f1efe8", "#5f5e5a"),
+SIGNAL_META = {
+    "RS Leader":    ("#dceeff", "#0c3d7a", "Top RS percentile or RS at new high — institutional accumulation"),
+    "Breakout":     ("#d4f0e0", "#0f5c2e", "Near 52W high with strong trend — O'Neil breakout setup"),
+    "Stage 2":      ("#e8d4f0", "#4a0f7a", "Weinstein Stage 2 uptrend — rising 30W MA, price above"),
+    "News-Driven⚑": ("#fff3cd", "#7a4f00", "Sharp recent move — likely event driven, limited juice ahead"),
+    "Vol Surge":    ("#d4eaf0", "#0f4a5c", "Rising on volume, holds on light volume — accumulation sign"),
+    "Extended":     ("#ffe8cc", "#7a3f00", "Far above MA — parabolic risk, not ideal entry point"),
+    "Weak":         ("#fde8e8", "#7a1f1f", "Stage 4 / below key MAs / poor RS — avoid or short"),
+    "Neutral":      ("#f1efe8", "#5f5e5a", "No strong directional signal — wait and watch"),
 }
 
-# ── Supabase helpers ─────────────────────────────────────────────────────────
+# ── Supabase helpers ──────────────────────────────────────────────────────────
 def sb_get(table, select="*", qs="", limit=2000):
     url = f"{SUPABASE_URL}/rest/v1/{table}?select={select}&limit={limit}"
     if qs:
         url += f"&{qs}"
     try:
-        r = requests.get(url, headers=SB_HEADERS, timeout=30)
+        r = requests.get(url, headers=SB_H, timeout=20)
         return r.json() if r.status_code == 200 else []
     except Exception:
         return []
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_latest_scores():
-    """Load most-recent ar_daily_scores from Supabase."""
+@st.cache_data(ttl=180, show_spinner=False)
+def load_scores_fast():
+    """Single fast query — uses only ar_daily_scores, no OHLCV join."""
+    # Step 1: latest date
     latest = sb_get("ar_daily_scores", "score_date", "order=score_date.desc&limit=1")
     if not latest:
         return pd.DataFrame(), "N/A"
     ld = latest[0]["score_date"]
+
+    # Step 2: all scores for that date — exact column names from schema
     data = sb_get(
         "ar_daily_scores",
-        "symbol,composite_score,bucket,weinstein_stage,rs_percentile,"
-        "rs_new_high,volume_score,stage_score,breakout_flag,"
-        "price_vs_ma30w,ma30w_slope,score_date",
+        "symbol,score_date,composite_score,bucket,weinstein_stage,"
+        "rs_percentile,rs_new_high,stage_score,rs_score,volume_price_score,"
+        "price,price_change_pct,high_52w,low_52w,price_vs_ma,ma_slope,"
+        "entry_signal,entry_detail,data_quality",
         f"score_date=eq.{ld}&order=composite_score.desc",
         limit=2000,
     )
-    return pd.DataFrame(data) if data else pd.DataFrame(), ld
+    if not data:
+        return pd.DataFrame(), ld
+
+    df = pd.DataFrame(data)
+    for c in ["composite_score","rs_percentile","stage_score","rs_score",
+              "volume_price_score","price","price_change_pct",
+              "high_52w","low_52w","price_vs_ma","ma_slope"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df, ld
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def load_universe():
-    data = sb_get("ar_universe", "symbol,company_name,industry,sector,cap_bucket,yf_ticker", "is_active=eq.true", limit=2000)
+    data = sb_get("ar_universe",
+                  "symbol,company_name,industry,sector,cap_bucket",
+                  "is_active=eq.true", limit=2000)
     return {d["symbol"]: d for d in data} if data else {}
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_daily_ohlcv_batch():
-    """Load 1 year of daily OHLCV for all stocks from Supabase."""
-    cutoff = (datetime.now() - timedelta(days=380)).strftime("%Y-%m-%d")
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_score_history_returns():
+    """
+    Load last 30 days of scores to compute 1W/1M/3M/1Y price returns
+    via (price_today - price_N_days_ago) / price_N_days_ago.
+    This avoids needing ar_daily_ohlcv entirely.
+    """
     data = sb_get(
-        "ar_daily_ohlcv",
-        "symbol,trade_date,close,volume",
-        f"trade_date=gte.{cutoff}&order=symbol.asc,trade_date.asc",
-        limit=200000,
+        "ar_daily_scores",
+        "symbol,score_date,price",
+        "order=symbol.asc,score_date.desc",
+        limit=100000,
     )
     if not data:
         return {}
     df = pd.DataFrame(data)
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-    grouped = {}
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["score_date"] = pd.to_datetime(df["score_date"])
+
+    result = {}
     for sym, g in df.groupby("symbol"):
-        grouped[sym] = g.sort_values("trade_date").reset_index(drop=True)
-    return grouped
+        g = g.sort_values("score_date", ascending=False).dropna(subset=["price"])
+        prices = g["price"].values
+        result[sym] = prices  # index 0 = today, 1 = yesterday, 5 = ~1W, 21 = ~1M, etc.
+    return result
 
 
-# ── Breeze connection ─────────────────────────────────────────────────────────
+def calc_returns_from_history(sym, hist, live_cmp=None):
+    """Calculate multi-period returns from score history prices."""
+    series = hist.get(sym)
+    out = dict(ret_1w=None, ret_1m=None, ret_3m=None, ret_1y=None)
+    if series is None or len(series) < 2:
+        return out
+    cmp = live_cmp or float(series[0])
+
+    def r(n):
+        if len(series) > n and series[n] and series[n] > 0:
+            return round((cmp - float(series[n])) / float(series[n]) * 100, 2)
+        return None
+
+    out["ret_1w"]  = r(5)
+    out["ret_1m"]  = r(21)
+    out["ret_3m"]  = r(63)
+    out["ret_1y"]  = r(252)
+    return out
+
+
+# ── Breeze ────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_breeze():
     if not BREEZE_OK:
@@ -130,638 +165,466 @@ def get_breeze():
     except Exception as e:
         err = str(e)
         if any(w in err.lower() for w in ["session", "token", "auth", "invalid"]):
-            return None, "🔄 Session token expired — go to ICICIdirect.com → API → Generate Session → update BREEZE_SESSION_TOKEN in Streamlit Secrets."
+            return None, "🔄 Token expired — regenerate BREEZE_SESSION_TOKEN at ICICIdirect.com → API → Sessions"
         return None, f"Breeze error: {err}"
 
 
 @st.cache_data(ttl=90, show_spinner=False)
-def fetch_live_prices(symbols: tuple) -> dict:
-    """Fetch live LTP + prev_close from Breeze for up to 500 symbols in batches."""
+def fetch_live_cmp(symbols: tuple) -> dict:
+    """Fetch live LTP from Breeze. Returns {sym: {cmp, chg_1d, vol_today}}."""
     breeze, err = get_breeze()
-    result = {}
     if err or not breeze:
-        return result
-
+        return {}
+    result = {}
     for sym in symbols:
         try:
             resp = breeze.get_quotes(
                 stock_code=BREEZE_MAP.get(sym, sym),
-                exchange_code="NSE",
-                product_type="cash",
-                expiry_date="",
-                right="",
-                strike_price="",
+                exchange_code="NSE", product_type="cash",
+                expiry_date="", right="", strike_price="",
             )
             if resp and resp.get("Success"):
                 d = resp["Success"][0]
                 ltp  = float(d.get("last_rate", 0) or 0)
                 prev = float(d.get("previous_close", 0) or 0)
-                vol  = float(d.get("total_quantity_traded", 0) or 0)
-                avg5 = float(d.get("average_price", 0) or 0)
-                open_ = float(d.get("open_rate", 0) or 0)
-                high_ = float(d.get("high_rate", 0) or 0)
-                low_  = float(d.get("low_rate", 0) or 0)
+                vol  = int(float(d.get("total_quantity_traded", 0) or 0))
                 if ltp > 0:
                     result[sym] = {
-                        "cmp":        round(ltp, 2),
-                        "prev_close": round(prev, 2) if prev > 0 else ltp,
-                        "chg_1d":     round((ltp - prev) / prev * 100, 2) if prev > 0 else 0.0,
-                        "vol_today":  int(vol),
-                        "open":       round(open_, 2),
-                        "high":       round(high_, 2),
-                        "low":        round(low_, 2),
+                        "cmp":    round(ltp, 2),
+                        "chg_1d": round((ltp - prev) / prev * 100, 2) if prev > 0 else 0.0,
+                        "vol_today": vol,
                     }
-            time.sleep(0.05)  # ~20 req/s — safe within Breeze limits
+            time.sleep(0.04)
         except Exception:
             continue
     return result
 
 
-# ── Return calculations ───────────────────────────────────────────────────────
-def calc_returns(sym: str, daily_map: dict, live_cmp: float | None = None) -> dict:
-    """Given daily OHLCV dataframe for a symbol, calculate multi-period returns."""
-    out = {"ret_1w": None, "ret_1m": None, "ret_3m": None, "ret_1y": None,
-           "vol_ratio_20d": None, "at_52w_high_pct": None, "above_200d_ma": None,
-           "avg_vol_20d": None}
-    df = daily_map.get(sym)
-    if df is None or len(df) < 5:
-        return out
-
-    closes = df["close"].values
-    vols   = df["volume"].values
-    cmp    = live_cmp if live_cmp else float(closes[-1])
-
-    def pret(n):
-        if len(closes) > n:
-            base = float(closes[-(n+1)])
-            return round((cmp - base) / base * 100, 2) if base > 0 else None
-        return None
-
-    out["ret_1w"]  = pret(5)
-    out["ret_1m"]  = pret(21)
-    out["ret_3m"]  = pret(63)
-    out["ret_1y"]  = pret(252)
-
-    # Volume ratio: avg last 5 days vs avg last 20 days
-    if len(vols) >= 20:
-        recent_vol = float(np.mean(vols[-5:]))
-        base_vol   = float(np.mean(vols[-20:]))
-        out["vol_ratio_20d"] = round(recent_vol / base_vol, 2) if base_vol > 0 else None
-        out["avg_vol_20d"]   = int(base_vol)
-
-    # 52-week high proximity
-    if len(closes) >= 52:
-        h52 = float(np.max(closes[-252:])) if len(closes) >= 252 else float(np.max(closes))
-        out["at_52w_high_pct"] = round((cmp - h52) / h52 * 100, 2) if h52 > 0 else None
-
-    # 200d MA
-    if len(closes) >= 200:
-        ma200 = float(np.mean(closes[-200:]))
-        out["above_200d_ma"] = cmp > ma200
-
-    return out
-
-
 # ── Signal classification ─────────────────────────────────────────────────────
-def classify_signal(row: dict) -> list[str]:
-    """
-    Returns a list of signal tags based on scoring metrics + return patterns.
-    Mirrors how O'Neil, Minervini, Weinstein, and Darvas would classify.
-    """
-    signals = []
-    score   = row.get("composite_score", 0) or 0
-    rs_pct  = row.get("rs_percentile", 50) or 50
-    rs_nh   = row.get("rs_new_high", False)
+def classify(row) -> list:
     stage   = str(row.get("weinstein_stage", "") or "")
-    bk_flag = row.get("breakout_flag", False)
-    vol_r   = row.get("vol_ratio_20d") or 1.0
-    at52h   = row.get("at_52w_high_pct") or -999
-    ret1m   = row.get("ret_1m") or 0
-    ret3m   = row.get("ret_3m") or 0
-    ret1y   = row.get("ret_1y") or 0
-    above200 = row.get("above_200d_ma", False)
+    rs_pct  = float(row.get("rs_percentile", 50) or 50)
+    rs_nh   = bool(row.get("rs_new_high", False))
+    score   = float(row.get("composite_score", 50) or 50)
+    pvm     = float(row.get("price_vs_ma", 0) or 0)      # % above/below 30W MA
+    slope   = float(row.get("ma_slope", 0) or 0)
+    vol_s   = float(row.get("volume_price_score", 0) or 0)
+    price   = float(row.get("price", 0) or 0)
+    h52     = float(row.get("high_52w", 0) or 0)
+    l52     = float(row.get("low_52w", 0) or 0)
+    ret_1m  = float(row.get("ret_1m", 0) or 0)
+    ret_3m  = float(row.get("ret_3m", 0) or 0)
 
-    # 1. RS Leader — top RS percentile, RS new high
+    # 52W range position
+    range52 = h52 - l52
+    pos52   = (price - l52) / range52 * 100 if range52 > 0 else 50
+
+    sigs = []
+
+    # RS Leader
     if rs_pct >= 85 or rs_nh:
-        signals.append("RS Leader")
+        sigs.append("RS Leader")
 
-    # 2. Breakout — near/at 52w high with good volume OR explicit breakout_flag
-    if bk_flag or (at52h is not None and at52h >= -3.0 and vol_r >= 1.5):
-        signals.append("Breakout")
+    # Breakout — top 5% of 52W range
+    if pos52 >= 95 or (pos52 >= 90 and vol_s >= 12):
+        sigs.append("Breakout")
 
-    # 3. Stage 2 — Weinstein Stage 2A or 2B
+    # Stage 2
     if "2" in stage:
-        signals.append("Stage 2")
+        sigs.append("Stage 2")
 
-    # 4. News-Driven⚑ — large 1M jump but 3M not proportionally large
-    # Heuristic: big 1M spike (>15%) relative to the 3M trend could be event-driven
-    if ret1m and ret3m and ret1m > 15 and (ret3m == 0 or ret1m > ret3m * 0.6):
-        signals.append("News-Driven⚑")
+    # Extended — too far above MA, parabolic risk
+    if pvm > 30:
+        sigs.append("Extended")
+    # News-Driven — sharp 1M jump but not sustained in 3M
+    elif ret_1m > 18 and (ret_3m == 0 or ret_1m > ret_3m * 0.65):
+        sigs.append("News-Driven⚑")
 
-    # 5. Volume Surge — rising on volume, resilient on lower volume
-    if vol_r >= 1.8 and (ret1m or 0) > 0:
-        signals.append("Vol Surge")
+    # Volume Surge
+    if vol_s >= 14:
+        sigs.append("Vol Surge")
 
-    # 6. Weak — Stage 4, below 200 MA, weak RS
-    if (rs_pct < 30 and not above200) or "4" in stage or score < 30:
-        signals.append("Weak")
+    # Weak
+    if "4" in stage or score < 25 or (rs_pct < 25 and pvm < -5):
+        sigs.append("Weak")
 
-    # Default
-    if not signals:
-        signals.append("Neutral")
-
-    return signals
+    return sigs if sigs else ["Neutral"]
 
 
-def strength_score(row: dict) -> float:
-    """
-    Composite strength score combining:
-      40% — existing AlphaRadar composite_score (Weinstein+RS+Volume from Supabase)
-      30% — multi-timeframe momentum (1W, 1M, 3M, 1Y)
-      15% — volume character (vol_ratio)
-      15% — proximity to 52W high (breakout readiness)
-    Range: 0–100
-    """
-    base  = float(row.get("composite_score", 50) or 50)  # already 0–100
-    r1w   = row.get("ret_1w") or 0
-    r1m   = row.get("ret_1m") or 0
-    r3m   = row.get("ret_3m") or 0
-    r1y   = row.get("ret_1y") or 0
-    vol_r = row.get("vol_ratio_20d") or 1.0
-    at52h = row.get("at_52w_high_pct") or -50
+# ── Strength score ─────────────────────────────────────────────────────────────
+def strength(row) -> float:
+    """Composite 0–100. No ar_daily_ohlcv needed."""
+    base   = float(row.get("composite_score", 50) or 50)
+    r1w    = float(row.get("ret_1w", 0) or 0)
+    r1m    = float(row.get("ret_1m", 0) or 0)
+    r3m    = float(row.get("ret_3m", 0) or 0)
+    r1y    = float(row.get("ret_1y", 0) or 0)
+    vol_s  = float(row.get("volume_price_score", 0) or 0)  # 0–20 in the engine
+    price  = float(row.get("price", 0) or 0)
+    h52    = float(row.get("high_52w", 1) or 1)
+    l52    = float(row.get("low_52w", 0) or 0)
+    pvm    = float(row.get("price_vs_ma", 0) or 0)
 
-    # Momentum sub-score (0–100)
-    mom = (
-        np.clip(r1w  * 4,   -10, 10) +
-        np.clip(r1m  * 1.5, -20, 20) +
-        np.clip(r3m  * 0.5, -20, 20) +
-        np.clip(r1y  * 0.1, -10, 10) +
-        50  # center at 50
+    rng = h52 - l52
+    pos52 = (price - l52) / rng * 100 if rng > 0 else 50
+
+    mom = np.clip(
+        r1w * 4 + r1m * 1.5 + r3m * 0.5 + r1y * 0.08 + 50,
+        0, 100
     )
-    mom = np.clip(mom, 0, 100)
+    vol_norm = np.clip(vol_s * 5, 0, 100)           # vol_price_score 0-20 → 0-100
+    pos_norm = np.clip(pos52, 0, 100)
 
-    # Volume sub-score (0–100)
-    vol_s = np.clip((vol_r - 1) * 30 + 50, 0, 100)
+    # Penalise Extended (pvm > 30) — entry risk
+    ext_penalty = max(0, (pvm - 30) * 0.5) if pvm > 30 else 0
 
-    # 52W High proximity (0–100); at ATH = 100, 20% away = 0
-    h52_s = np.clip(100 + at52h * 5, 0, 100)
-
-    total = 0.40 * base + 0.30 * mom + 0.15 * vol_s + 0.15 * h52_s
-    return round(float(total), 2)
+    total = 0.42 * base + 0.28 * mom + 0.15 * vol_norm + 0.15 * pos_norm - ext_penalty
+    return round(float(np.clip(total, 0, 100)), 1)
 
 
-# ── Claude API — batch justifications ────────────────────────────────────────
-def get_claude_justifications(stocks_batch: list[dict]) -> dict:
-    """
-    Call Claude API once with a batch of up to 30 stocks.
-    Returns {symbol: "one-line justification"} dict.
-    """
+# ── Claude justifications ─────────────────────────────────────────────────────
+def claude_justify(stocks: list) -> dict:
     try:
-        api_key = st.secrets.get("ANTHROPIC_API_KEY") or st.secrets.get("anthropic_api_key", "")
-        if not api_key:
+        key = (st.secrets.get("ANTHROPIC_API_KEY")
+               or st.secrets.get("anthropic_api_key", ""))
+        if not key:
             return {}
-
-        prompt_lines = []
-        for s in stocks_batch:
-            prompt_lines.append(
-                f"{s['symbol']} | Score={s['score']:.0f} | Stage={s['stage']} | "
-                f"RS%ile={s['rs_pct']:.0f} | 1D={s['ret_1d']:+.1f}% | "
-                f"1W={s['ret_1w']:+.1f}% | 1M={s['ret_1m']:+.1f}% | "
-                f"3M={s['ret_3m']:+.1f}% | 1Y={s['ret_1y']:+.1f}% | "
-                f"VolRatio={s['vol_r']:.1f} | 52WH={s['at52h']:+.1f}% | "
-                f"Signals={','.join(s['signals'])}"
+        lines = []
+        for s in stocks:
+            lines.append(
+                f"{s['sym']} | Score={s['score']:.0f} | Stage={s['stage']} | "
+                f"RS%={s['rs']:.0f} | RSNewHigh={s['rsnh']} | "
+                f"1D={s['d1']:+.1f}% | 1W={s['w1']:+.1f}% | 1M={s['m1']:+.1f}% | "
+                f"3M={s['m3']:+.1f}% | 1Y={s['y1']:+.1f}% | "
+                f"PvMA={s['pvm']:+.1f}% | Signals={','.join(s['sigs'])}"
             )
-
-        system = (
-            "You are a top equity analyst (O'Neil + Minervini + Weinstein methodology). "
-            "For each NSE stock given, write EXACTLY ONE LINE (max 12 words) explaining "
-            "why it is strong or weak. Be specific — mention the exact strength/weakness. "
-            "Use trader language: 'Stage 2 breakout with volume', 'RS new high, expanding margins', "
-            "'Extended after earnings pop — limited upside near term', 'Below 200MA, Stage 4 decline'. "
-            "For News-Driven stocks with ⚑, flag with '⚑' in the justification. "
-            "Return ONLY a JSON object: {\"SYMBOL\": \"one-line justification\", ...}. "
-            "No extra text, no markdown, no preamble."
+        sys_p = (
+            "You are a top Indian equity analyst (O'Neil + Minervini + Weinstein). "
+            "For EACH stock write exactly ONE LINE (max 12 words) explaining the KEY "
+            "signal — be specific, use trader language. "
+            "For News-Driven⚑ include ⚑ and warn juice may be limited. "
+            "For Weak be direct about why. "
+            "Return ONLY valid JSON: {\"SYMBOL\": \"one-line\", ...}. No extra text."
         )
-
-        user = "Analyse these stocks:\n" + "\n".join(prompt_lines)
-
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"Content-Type": "application/json"},
             json={
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1000,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
+                "max_tokens": 1500,
+                "system": sys_p,
+                "messages": [{"role": "user", "content": "\n".join(lines)}],
             },
             timeout=60,
         )
         if resp.status_code != 200:
             return {}
         text = resp.json()["content"][0]["text"].strip()
-        # Strip markdown fences if present
         text = text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
     except Exception:
         return {}
 
 
-# ── Formatting helpers ────────────────────────────────────────────────────────
-def fmt_ret(v):
+# ── Formatting ────────────────────────────────────────────────────────────────
+def fr(v, decimals=1):
     if v is None or (isinstance(v, float) and math.isnan(v)):
-        return "—"
-    color = "#1a7a4a" if v > 0 else ("#c0392b" if v < 0 else "#888")
-    arrow = "▲" if v > 0 else ("▼" if v < 0 else "")
-    return f'<span style="color:{color};font-weight:500">{arrow}{abs(v):.1f}%</span>'
+        return '<span style="color:#bbb">—</span>'
+    c = "#1a7a4a" if v > 0 else ("#c0392b" if v < 0 else "#888")
+    a = "▲" if v > 0 else ("▼" if v < 0 else "")
+    return f'<span style="color:{c};font-weight:500">{a}{abs(v):.{decimals}f}%</span>'
 
 
-def fmt_cmp(v):
-    if v is None:
-        return "—"
-    return f"₹{v:,.2f}"
+def badge(score):
+    if score >= 75:   bg, fg, g = "#d4f0e0", "#0f5c2e", "S"
+    elif score >= 60: bg, fg, g = "#dceeff", "#0c3d7a", "A"
+    elif score >= 40: bg, fg, g = "#fff3cd", "#7a4f00", "B"
+    else:             bg, fg, g = "#fde8e8", "#7a1f1f", "C"
+    return (f'<span style="background:{bg};color:{fg};padding:2px 9px;'
+            f'border-radius:10px;font-size:11px;font-weight:600">{g} {score:.0f}</span>')
 
 
-def render_signals(signals: list[str]) -> str:
+def sig_tags(sigs):
     parts = []
-    for s in signals:
-        bg, fg = SIGNAL_COLORS.get(s, ("#eee", "#333"))
-        parts.append(
-            f'<span style="background:{bg};color:{fg};padding:2px 7px;'
-            f'border-radius:4px;font-size:11px;font-weight:500;white-space:nowrap">{s}</span>'
-        )
+    for s in sigs:
+        bg, fg, _ = SIGNAL_META.get(s, ("#eee", "#333", ""))
+        parts.append(f'<span style="background:{bg};color:{fg};padding:1px 6px;'
+                     f'border-radius:4px;font-size:10px;font-weight:600;white-space:nowrap">{s}</span>')
     return " ".join(parts)
 
 
-def score_badge(score: float) -> str:
-    if score >= 75:
-        bg, fg, g = "#d4f0e0", "#0f5c2e", "S"
-    elif score >= 60:
-        bg, fg, g = "#dceeff", "#0c3d7a", "A"
-    elif score >= 40:
-        bg, fg, g = "#fff3cd", "#7a4f00", "B"
-    else:
-        bg, fg, g = "#fde8e8", "#7a1f1f", "C"
-    return (
-        f'<span style="background:{bg};color:{fg};padding:3px 10px;'
-        f'border-radius:10px;font-size:12px;font-weight:500">{g} {score:.0f}</span>'
-    )
+def cap_icon(c):
+    return {"large": "🔵", "mid": "🟡", "small": "🟢", "micro": "⚪"}.get(str(c), "⬜")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MAIN UI
+#  UI
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.title("🏆 Nifty 500 — Strength Ranker")
 st.caption(
-    "Strongest stocks ranked #1 · Live CMP via Breeze · Multi-frame returns · "
-    "RS / Stage / Volume / Breakout signals · Claude AI one-line justification"
+    "Strongest stocks ranked #1 · Live CMP via Breeze · "
+    "1W/1M/3M/1Y returns from score history · RS / Stage / Volume / Breakout signals · "
+    "Claude AI one-line justification"
 )
 
-# ── Inline controls (sidebar disabled inside tab layout) ─────────────────────
+# ── Filter bar ────────────────────────────────────────────────────────────────
 with st.expander("⚙️ Filters & Settings", expanded=False):
-    col_a, col_b, col_c, col_d, col_e = st.columns(5)
-    with col_a:
-        use_live = st.toggle("🔴 Live Breeze prices", value=True)
-        use_claude = st.toggle("🤖 Claude AI justifications", value=True)
-    with col_b:
-        sig_filter = st.multiselect(
-            "Signal filter",
-            ["RS Leader", "Breakout", "Stage 2", "News-Driven⚑", "Vol Surge", "Weak", "Neutral"],
-            default=[],
-        )
-    with col_c:
-        grade_filter = st.multiselect("Grade filter", ["S", "A", "B", "C"], default=[])
-    with col_d:
-        cap_filter = st.selectbox("Cap bucket", ["All", "large", "mid", "small", "micro"])
-    with col_e:
-        top_n = st.slider("Show top N stocks", 50, 500, 200, step=50)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    use_live   = c1.toggle("🔴 Live Breeze CMP", value=True)
+    use_claude = c1.toggle("🤖 AI Justifications", value=True)
+    sig_f   = c2.multiselect("Signal", list(SIGNAL_META.keys()), default=[])
+    grade_f = c3.multiselect("Grade", ["S","A","B","C"], default=[])
+    cap_f   = c4.selectbox("Cap bucket", ["All","large","mid","small","micro"])
+    top_n   = c5.slider("Top N", 50, 750, 250, step=50)
 
-st.markdown("---")
-# Signal legend inline
-legend_html = " &nbsp;".join(
-    f'<span style="background:{bg};color:{fg};padding:2px 8px;border-radius:4px;font-size:11px">{sig}</span>'
-    for sig, (bg, fg) in SIGNAL_COLORS.items()
+# Signal legend
+leg = " &nbsp;".join(
+    f'<span style="background:{bg};color:{fg};padding:2px 7px;border-radius:4px;'
+    f'font-size:11px">{s}</span>'
+    for s, (bg, fg, _) in SIGNAL_META.items()
 )
-st.markdown(f"**Signal legend:** &nbsp; {legend_html}", unsafe_allow_html=True)
+st.markdown(f"**Signals:** &nbsp;{leg}", unsafe_allow_html=True)
+st.divider()
 
-# ── Load Supabase data ────────────────────────────────────────────────────────
-with st.spinner("Loading scores and universe from Supabase…"):
-    scores_df, score_date = load_latest_scores()
-    universe  = load_universe()
+# ── Load data (fast — no OHLCV) ───────────────────────────────────────────────
+with st.spinner("Loading scores from Supabase…"):
+    scores_df, score_date = load_scores_fast()
+    universe = load_universe()
 
 if scores_df.empty:
-    st.error(
-        "⚠️ No scores found in Supabase. Run **⚡ Run Scoring** first to populate `ar_daily_scores`."
-    )
+    st.error("⚠️ No scores in Supabase. Go to **⚡ Run Scoring** tab and run the pipeline.")
     st.stop()
 
-# Limit to Nifty 500 — filter by composite score availability + large/mid cap
-# (Nifty 500 = Nifty50 + Nifty100 + MidCap150 + SmallCap250)
-all_symbols = scores_df["symbol"].tolist()
+with st.spinner("Loading price history for multi-period returns…"):
+    hist = load_score_history_returns()
 
-# ── Load OHLCV from Supabase ──────────────────────────────────────────────────
-with st.spinner(f"Loading price history for {len(all_symbols)} stocks…"):
-    daily_map = load_daily_ohlcv_batch()
-
-# ── Fetch live prices via Breeze ──────────────────────────────────────────────
-live_prices = {}
-breeze_err  = None
+# ── Live Breeze prices ────────────────────────────────────────────────────────
+live = {}
+breeze_status = "⚠️ Not fetched"
 if use_live:
     breeze, berr = get_breeze()
     if berr:
-        breeze_err = berr
-        st.warning(f"⚠️ Breeze: {berr}  |  Falling back to last-close from Supabase.")
+        st.warning(f"Breeze: {berr}")
+        breeze_status = "⚠️ " + berr[:60]
     else:
-        pb = st.progress(0, "Fetching live prices from Breeze…")
-        batch_size = 50
-        syms_tuple = tuple(all_symbols)
-        # Fetch in batches to show progress
-        for i in range(0, len(syms_tuple), batch_size):
-            batch = syms_tuple[i:i + batch_size]
-            chunk = fetch_live_prices(batch)
-            live_prices.update(chunk)
-            pb.progress(min((i + batch_size) / len(syms_tuple), 1.0),
-                        f"Breeze: {len(live_prices)} / {len(syms_tuple)} stocks…")
+        syms = tuple(scores_df["symbol"].tolist())
+        pb = st.progress(0, f"Fetching live prices from Breeze (0 / {len(syms)})…")
+        BATCH = 50
+        for i in range(0, len(syms), BATCH):
+            chunk = fetch_live_cmp(syms[i:i+BATCH])
+            live.update(chunk)
+            pb.progress(
+                min((i + BATCH) / len(syms), 1.0),
+                f"Breeze: {len(live)} / {len(syms)} live…"
+            )
         pb.empty()
-        st.success(f"✅ Live prices fetched for **{len(live_prices)}** stocks via Breeze")
+        breeze_status = f"✅ {len(live)} stocks live"
 
-# ── Build master dataframe ────────────────────────────────────────────────────
+# ── Build master table ────────────────────────────────────────────────────────
 rows = []
-for _, sc_row in scores_df.iterrows():
-    sym   = sc_row["symbol"]
-    uni   = universe.get(sym, {})
-    live  = live_prices.get(sym, {})
-    cmp   = live.get("cmp") or None
-    chg1d = live.get("chg_1d") or None
+for _, sc in scores_df.iterrows():
+    sym  = sc["symbol"]
+    uni  = universe.get(sym, {})
+    lv   = live.get(sym, {})
 
-    rets = calc_returns(sym, daily_map, live_cmp=cmp)
+    cmp   = lv.get("cmp")  or float(sc.get("price") or 0) or None
+    chg1d = lv.get("chg_1d") or float(sc.get("price_change_pct") or 0)
 
-    combined = {
-        "symbol":          sym,
-        "company_name":    uni.get("company_name", sym),
-        "sector":          uni.get("sector", "—"),
-        "industry":        uni.get("industry", "—"),
-        "cap_bucket":      uni.get("cap_bucket", "—"),
-        "cmp":             cmp,
-        "chg_1d":          chg1d,
-        "ret_1w":          rets["ret_1w"],
-        "ret_1m":          rets["ret_1m"],
-        "ret_3m":          rets["ret_3m"],
-        "ret_1y":          rets["ret_1y"],
-        "vol_ratio_20d":   rets["vol_ratio_20d"],
-        "avg_vol_20d":     rets["avg_vol_20d"],
-        "at_52w_high_pct": rets["at_52w_high_pct"],
-        "above_200d_ma":   rets["above_200d_ma"],
-        # From scoring engine
-        "composite_score": float(sc_row.get("composite_score") or 50),
-        "weinstein_stage": str(sc_row.get("weinstein_stage") or ""),
-        "rs_percentile":   float(sc_row.get("rs_percentile") or 50),
-        "rs_new_high":     bool(sc_row.get("rs_new_high") or False),
-        "breakout_flag":   bool(sc_row.get("breakout_flag") or False),
-        "volume_score":    float(sc_row.get("volume_score") or 0),
+    rets = calc_returns_from_history(sym, hist, live_cmp=cmp)
+
+    row = {
+        "symbol":        sym,
+        "name":          uni.get("company_name", sym),
+        "sector":        uni.get("sector", "—"),
+        "cap":           uni.get("cap_bucket", "—"),
+        "cmp":           cmp,
+        "chg_1d":        chg1d,
+        "ret_1w":        rets["ret_1w"],
+        "ret_1m":        rets["ret_1m"],
+        "ret_3m":        rets["ret_3m"],
+        "ret_1y":        rets["ret_1y"],
+        # straight from scores table
+        "composite_score":    sc["composite_score"],
+        "weinstein_stage":    str(sc.get("weinstein_stage") or ""),
+        "rs_percentile":      sc["rs_percentile"],
+        "rs_new_high":        bool(sc.get("rs_new_high")),
+        "stage_score":        sc["stage_score"],
+        "rs_score":           sc["rs_score"],
+        "volume_price_score": sc["volume_price_score"],
+        "price_vs_ma":        sc["price_vs_ma"],
+        "ma_slope":           sc["ma_slope"],
+        "high_52w":           sc["high_52w"],
+        "low_52w":            sc["low_52w"],
+        "entry_signal":       str(sc.get("entry_signal") or ""),
+        "entry_detail":       str(sc.get("entry_detail") or ""),
+        "bucket":             str(sc.get("bucket") or ""),
     }
+    row["signals"]  = classify(row)
+    row["strength"] = strength(row)
+    row["grade"]    = "S" if row["strength"]>=75 else ("A" if row["strength"]>=60 else ("B" if row["strength"]>=40 else "C"))
+    rows.append(row)
 
-    combined["signals"]        = classify_signal(combined)
-    combined["strength_score"] = strength_score(combined)
-
-    grade_val = combined["strength_score"]
-    if grade_val >= 75:
-        combined["grade"] = "S"
-    elif grade_val >= 60:
-        combined["grade"] = "A"
-    elif grade_val >= 40:
-        combined["grade"] = "B"
-    else:
-        combined["grade"] = "C"
-
-    rows.append(combined)
-
-master = pd.DataFrame(rows).sort_values("strength_score", ascending=False).reset_index(drop=True)
+master = (pd.DataFrame(rows)
+          .sort_values("strength", ascending=False)
+          .reset_index(drop=True))
 master["rank"] = master.index + 1
 
-# ── Sector filter options (populate after data loads) ─────────────────────────
-
-# ── Apply filters ─────────────────────────────────────────────────────────────
+# ── Filters ───────────────────────────────────────────────────────────────────
 filt = master.copy()
-if sig_filter:
-    filt = filt[filt["signals"].apply(lambda ss: any(s in ss for s in sig_filter))]
-if grade_filter:
-    filt = filt[filt["grade"].isin(grade_filter)]
-if cap_filter != "All":
-    filt = filt[filt["cap_bucket"] == cap_filter]
-filt = filt.head(top_n)
+if sig_f:
+    filt = filt[filt["signals"].apply(lambda ss: any(s in ss for s in sig_f))]
+if grade_f:
+    filt = filt[filt["grade"].isin(grade_f)]
+if cap_f != "All":
+    filt = filt[filt["cap"] == cap_f]
+filt = filt.head(top_n).reset_index(drop=True)
 
-# ── Claude justifications ─────────────────────────────────────────────────────
-justifications = {}
+# ── Claude AI justifications ──────────────────────────────────────────────────
+justif = {}
 if use_claude and not filt.empty:
-    batch_syms = filt.head(100)  # justify top 100 visible stocks
-    claude_input = []
-    for _, r in batch_syms.iterrows():
-        claude_input.append({
-            "symbol":  r["symbol"],
-            "score":   r["strength_score"],
-            "stage":   r["weinstein_stage"],
-            "rs_pct":  r["rs_percentile"],
-            "ret_1d":  r["chg_1d"] or 0,
-            "ret_1w":  r["ret_1w"] or 0,
-            "ret_1m":  r["ret_1m"] or 0,
-            "ret_3m":  r["ret_3m"] or 0,
-            "ret_1y":  r["ret_1y"] or 0,
-            "vol_r":   r["vol_ratio_20d"] or 1.0,
-            "at52h":   r["at_52w_high_pct"] or -99,
-            "signals": r["signals"],
+    claude_in = []
+    for _, r in filt.head(100).iterrows():
+        claude_in.append({
+            "sym": r["symbol"], "score": r["strength"],
+            "stage": r["weinstein_stage"], "rs": r["rs_percentile"],
+            "rsnh": r["rs_new_high"],
+            "d1": r["chg_1d"] or 0, "w1": r["ret_1w"] or 0,
+            "m1": r["ret_1m"] or 0, "m3": r["ret_3m"] or 0,
+            "y1": r["ret_1y"] or 0,
+            "pvm": r["price_vs_ma"] or 0,
+            "sigs": r["signals"],
         })
+    with st.spinner("🤖 Claude generating justifications for top 100 stocks…"):
+        for i in range(0, len(claude_in), 30):
+            justif.update(claude_justify(claude_in[i:i+30]))
 
-    with st.spinner("🤖 Claude AI generating one-line justifications…"):
-        # Split into chunks of 30
-        for i in range(0, len(claude_input), 30):
-            chunk = claude_input[i:i + 30]
-            result = get_claude_justifications(chunk)
-            justifications.update(result)
+# ── Summary metrics ────────────────────────────────────────────────────────────
+m1,m2,m3,m4,m5,m6,m7 = st.columns(7)
+m1.metric("Universe",         len(master))
+m2.metric("Grade S (Elite)",  len(master[master.grade=="S"]))
+m3.metric("Grade A (Strong)", len(master[master.grade=="A"]))
+m4.metric("Grade C (Weak)",   len(master[master.grade=="C"]))
+m5.metric("Breakouts",        len(master[master.signals.apply(lambda s:"Breakout" in s)]))
+m6.metric("RS Leaders",       len(master[master.signals.apply(lambda s:"RS Leader" in s)]))
+m7.metric("Extended⚠️",       len(master[master.signals.apply(lambda s:"Extended" in s)]))
 
-# ── Summary metrics ───────────────────────────────────────────────────────────
-total   = len(master)
-s_count = len(master[master["grade"] == "S"])
-a_count = len(master[master["grade"] == "A"])
-c_count = len(master[master["grade"] == "C"])
-break_n = len(master[master["signals"].apply(lambda ss: "Breakout" in ss)])
-rs_lead = len(master[master["signals"].apply(lambda ss: "RS Leader" in ss)])
-
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Universe", total)
-m2.metric("Grade S (Elite)", s_count)
-m3.metric("Grade A (Strong)", a_count)
-m4.metric("Grade C (Weak)", c_count)
-m5.metric("Breakouts", break_n)
-m6.metric("RS Leaders", rs_lead)
-
-st.caption(f"Scores from: **{score_date}** · Live prices: {'✅ Breeze' if live_prices else '⚠️ Last close'} · Showing **{len(filt)}** stocks after filters")
+st.caption(
+    f"Scores: **{score_date}** · Live prices: **{breeze_status}** · "
+    f"Showing **{len(filt)}** of **{len(master)}** stocks"
+)
 st.divider()
 
-# ── Main table ─────────────────────────────────────────────────────────────────
-# Build HTML table for rich formatting
-table_rows_html = []
+# ── Main ranked table ──────────────────────────────────────────────────────────
+tbody = []
 for _, r in filt.iterrows():
-    just = justifications.get(r["symbol"], "—")
-    signals_html = render_signals(r["signals"])
-    badge_html   = score_badge(r["strength_score"])
+    just = justif.get(r["symbol"], r["entry_detail"] if r["entry_detail"] != "nan" else "—")
+    price52_pos = ""
+    if r["high_52w"] and r["low_52w"] and r["cmp"]:
+        rng = r["high_52w"] - r["low_52w"]
+        if rng > 0:
+            pct = (r["cmp"] - r["low_52w"]) / rng * 100
+            c52 = "#1a7a4a" if pct >= 80 else ("#888" if pct >= 40 else "#c0392b")
+            price52_pos = f'<span style="color:{c52};font-size:10px">{pct:.0f}%ile</span>'
 
-    chg_1d_html  = fmt_ret(r["chg_1d"])
-    ret_1w_html  = fmt_ret(r["ret_1w"])
-    ret_1m_html  = fmt_ret(r["ret_1m"])
-    ret_3m_html  = fmt_ret(r["ret_3m"])
-    ret_1y_html  = fmt_ret(r["ret_1y"])
+    entry_bg = {"BUY NOW":"#d4f0e0","WATCH":"#fff3cd","WAIT":"#f1efe8","AVOID":"#fde8e8"}.get(r["entry_signal"],"#f1efe8")
+    entry_fg = {"BUY NOW":"#0f5c2e","WATCH":"#7a4f00","WAIT":"#5f5e5a","AVOID":"#7a1f1f"}.get(r["entry_signal"],"#5f5e5a")
+    entry_tag = (f'<span style="background:{entry_bg};color:{entry_fg};padding:1px 5px;'
+                 f'border-radius:3px;font-size:10px">{r["entry_signal"]}</span>'
+                 if r["entry_signal"] and r["entry_signal"] != "nan" else "")
 
-    vol_str = "—"
-    if r["vol_ratio_20d"]:
-        vr = r["vol_ratio_20d"]
-        vc = "#1a7a4a" if vr >= 1.5 else ("#c0392b" if vr < 0.7 else "#888")
-        vol_str = f'<span style="color:{vc};font-weight:500">{vr:.1f}x</span>'
-
-    h52_str = "—"
-    if r["at_52w_high_pct"] is not None:
-        v = r["at_52w_high_pct"]
-        c = "#1a7a4a" if v >= -3 else ("#c47a0b" if v >= -10 else "#c0392b")
-        h52_str = f'<span style="color:{c}">{v:+.1f}%</span>'
-
-    cap_map = {"large": "🔵", "mid": "🟡", "small": "🟢", "micro": "⚪"}
-    cap_ico = cap_map.get(str(r["cap_bucket"]), "")
-
-    table_rows_html.append(f"""
+    tbody.append(f"""
     <tr>
-      <td style="color:#888;font-size:12px;text-align:center">{int(r['rank'])}</td>
+      <td style="color:#aaa;font-size:11px;text-align:center">{int(r['rank'])}</td>
       <td>
-        <div style="font-weight:500;font-size:13px">{r['symbol']}</div>
-        <div style="font-size:11px;color:#888">{cap_ico} {str(r['company_name'])[:28]}</div>
+        <div style="font-weight:600;font-size:13px">{r['symbol']}</div>
+        <div style="font-size:10px;color:#aaa">{cap_icon(r['cap'])} {str(r['name'])[:24]}</div>
       </td>
-      <td style="font-size:12px;color:#888">{str(r['sector'])[:18]}</td>
-      <td style="font-size:13px;font-weight:500">{fmt_cmp(r['cmp'])}</td>
-      <td style="text-align:right">{chg_1d_html}</td>
-      <td style="text-align:right">{ret_1w_html}</td>
-      <td style="text-align:right">{ret_1m_html}</td>
-      <td style="text-align:right">{ret_3m_html}</td>
-      <td style="text-align:right">{ret_1y_html}</td>
-      <td style="text-align:center">{vol_str}</td>
-      <td style="text-align:center">{h52_str}</td>
-      <td style="text-align:center">{str(r['weinstein_stage'])}</td>
-      <td>{badge_html}</td>
-      <td>{signals_html}</td>
-      <td style="font-size:11px;color:#666;max-width:200px">{just}</td>
+      <td style="font-size:11px;color:#888">{str(r['sector'])[:16]}</td>
+      <td style="font-size:13px;font-weight:500">{"₹"+f"{r['cmp']:,.1f}" if r['cmp'] else "—"}</td>
+      <td style="text-align:right">{fr(r['chg_1d'])}</td>
+      <td style="text-align:right">{fr(r['ret_1w'])}</td>
+      <td style="text-align:right">{fr(r['ret_1m'])}</td>
+      <td style="text-align:right">{fr(r['ret_3m'])}</td>
+      <td style="text-align:right">{fr(r['ret_1y'])}</td>
+      <td style="text-align:center;font-size:11px">{str(r['weinstein_stage'])}<br>{price52_pos}</td>
+      <td style="text-align:center">{badge(r['strength'])}</td>
+      <td>{sig_tags(r['signals'])}</td>
+      <td style="text-align:center">{entry_tag}</td>
+      <td style="font-size:11px;color:#666;max-width:190px;line-height:1.4">{just}</td>
     </tr>""")
 
 table_html = f"""
 <style>
-  .ranker-table {{
-    width: 100%;
-    border-collapse: collapse;
-    font-family: sans-serif;
-    font-size: 13px;
-  }}
-  .ranker-table th {{
-    background: #f8f8f6;
-    color: #888;
-    font-size: 11px;
-    font-weight: 500;
-    padding: 8px 6px;
-    border-bottom: 1px solid #e0e0e0;
-    white-space: nowrap;
-    text-align: left;
-    position: sticky;
-    top: 0;
-    z-index: 2;
-  }}
-  .ranker-table td {{
-    padding: 8px 6px;
-    border-bottom: 0.5px solid #f0f0ee;
-    vertical-align: middle;
-  }}
-  .ranker-table tr:hover td {{
-    background: #fafaf8;
-  }}
+.rt{{width:100%;border-collapse:collapse;font-family:sans-serif;font-size:12px}}
+.rt th{{background:#f8f8f6;color:#999;font-size:10px;font-weight:600;padding:7px 5px;
+        border-bottom:1.5px solid #e8e8e4;white-space:nowrap;text-align:left;
+        position:sticky;top:0;z-index:2}}
+.rt td{{padding:7px 5px;border-bottom:0.5px solid #f2f2f0;vertical-align:middle}}
+.rt tr:hover td{{background:#fafaf8}}
 </style>
-<div style="overflow-x:auto;max-height:80vh;overflow-y:auto">
-<table class="ranker-table">
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>Symbol</th>
-      <th>Sector</th>
-      <th>CMP</th>
-      <th style="text-align:right">1D</th>
-      <th style="text-align:right">1W</th>
-      <th style="text-align:right">1M</th>
-      <th style="text-align:right">3M</th>
-      <th style="text-align:right">1Y</th>
-      <th style="text-align:center">Vol Ratio</th>
-      <th style="text-align:center">52W Hi</th>
-      <th style="text-align:center">Stage</th>
-      <th style="text-align:center">Grade</th>
-      <th>Signals</th>
-      <th>AI Justification</th>
-    </tr>
-  </thead>
-  <tbody>
-    {''.join(table_rows_html)}
-  </tbody>
-</table>
-</div>
-"""
+<div style="overflow-x:auto;max-height:75vh;overflow-y:auto">
+<table class="rt">
+  <thead><tr>
+    <th>#</th><th>Symbol</th><th>Sector</th><th>CMP</th>
+    <th style="text-align:right">1D</th>
+    <th style="text-align:right">1W</th>
+    <th style="text-align:right">1M</th>
+    <th style="text-align:right">3M</th>
+    <th style="text-align:right">1Y</th>
+    <th style="text-align:center">Stage / 52W</th>
+    <th style="text-align:center">Grade</th>
+    <th>Signals</th>
+    <th style="text-align:center">Entry</th>
+    <th>AI Justification</th>
+  </tr></thead>
+  <tbody>{''.join(tbody)}</tbody>
+</table></div>"""
 
 st.markdown(table_html, unsafe_allow_html=True)
 
 # ── Export ────────────────────────────────────────────────────────────────────
 st.divider()
-export_cols = ["rank", "symbol", "company_name", "sector", "cap_bucket",
-               "cmp", "chg_1d", "ret_1w", "ret_1m", "ret_3m", "ret_1y",
-               "vol_ratio_20d", "at_52w_high_pct", "weinstein_stage",
-               "rs_percentile", "strength_score", "grade"]
+exp = filt[["rank","symbol","name","sector","cap","cmp","chg_1d",
+             "ret_1w","ret_1m","ret_3m","ret_1y","weinstein_stage",
+             "rs_percentile","composite_score","strength","grade",
+             "entry_signal"]].copy()
+exp["signals"] = filt["signals"].apply(lambda ss: " | ".join(ss))
+if justif:
+    exp["ai_justification"] = filt["symbol"].map(justif).fillna(filt["entry_detail"])
 
-export_df = filt[export_cols].copy()
-export_df["signals"] = filt["signals"].apply(lambda ss: " | ".join(ss))
-if justifications:
-    export_df["justification"] = filt["symbol"].map(justifications).fillna("—")
-
-csv = export_df.to_csv(index=False).encode()
-
-col1, col2 = st.columns([1, 4])
-with col1:
-    st.download_button(
-        "⬇️ Export CSV",
-        data=csv,
-        file_name=f"nifty500_strength_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-    )
-with col2:
+col_e, col_note = st.columns([1, 5])
+with col_e:
+    st.download_button("⬇️ Export CSV", exp.to_csv(index=False).encode(),
+                       f"n500_ranker_{score_date}.csv", "text/csv")
+with col_note:
     st.caption(
-        "Ranked by composite strength score (40% AlphaRadar engine · 30% multi-frame momentum · "
-        "15% volume character · 15% 52W-high proximity)"
+        "Grade formula: 42% AlphaRadar engine · 28% multi-period momentum · "
+        "15% volume-price score · 15% 52W-range position. "
+        "Extended stocks penalised for entry risk."
     )
 
-# ── Sector heatmap ────────────────────────────────────────────────────────────
+# ── Sector heatmap ─────────────────────────────────────────────────────────────
 st.divider()
 st.subheader("📊 Sector Strength Heatmap")
-sec_grp = master.groupby("sector").agg(
-    avg_score=("strength_score", "mean"),
-    count=("symbol", "count"),
-    avg_1m=("ret_1m", "mean"),
-    avg_3m=("ret_3m", "mean"),
-).reset_index().sort_values("avg_score", ascending=False)
+sec = (master.groupby("sector")
+       .agg(avg_score=("strength","mean"), n=("symbol","count"),
+            avg_1m=("ret_1m","mean"), avg_rs=("rs_percentile","mean"))
+       .reset_index().sort_values("avg_score", ascending=False))
 
-# Display as colored metric grid
-cols_per_row = 5
-for row_start in range(0, min(len(sec_grp), 25), cols_per_row):
-    sec_cols = st.columns(cols_per_row)
-    for ci, (_, sr) in enumerate(sec_grp.iloc[row_start:row_start + cols_per_row].iterrows()):
+cols_r = 5
+for start in range(0, min(len(sec), 30), cols_r):
+    cc = st.columns(cols_r)
+    for ci, (_, sr) in enumerate(sec.iloc[start:start+cols_r].iterrows()):
         sc = sr["avg_score"]
-        bg = "#d4f0e0" if sc >= 65 else ("#fff3cd" if sc >= 50 else "#fde8e8")
-        fc = "#0f5c2e" if sc >= 65 else ("#7a4f00" if sc >= 50 else "#7a1f1f")
-        sec_cols[ci].markdown(
+        bg = "#d4f0e0" if sc>=65 else ("#fff3cd" if sc>=50 else "#fde8e8")
+        fg = "#0f5c2e" if sc>=65 else ("#7a4f00" if sc>=50 else "#7a1f1f")
+        cc[ci].markdown(
             f'<div style="background:{bg};padding:10px 12px;border-radius:8px;margin:3px 0">'
-            f'<div style="font-size:11px;color:{fc};font-weight:500">{sr["sector"][:20]}</div>'
-            f'<div style="font-size:18px;font-weight:500;color:{fc}">{sc:.0f}</div>'
-            f'<div style="font-size:11px;color:{fc}">n={int(sr["count"])} · 1M {(sr["avg_1m"] or 0):+.1f}%</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+            f'<div style="font-size:10px;color:{fg};font-weight:600">{sr["sector"][:20]}</div>'
+            f'<div style="font-size:20px;font-weight:700;color:{fg}">{sc:.0f}</div>'
+            f'<div style="font-size:10px;color:{fg}">n={int(sr["n"])} &nbsp;|&nbsp; '
+            f'RS {sr["avg_rs"]:.0f}%ile &nbsp;|&nbsp; 1M {(sr["avg_1m"] or 0):+.1f}%</div>'
+            f'</div>', unsafe_allow_html=True)
 
-st.caption("Sector avg strength score · n = number of Nifty 500 stocks in sector · 1M = avg 1-month return")
+st.caption("Green ≥65 · Amber 50–65 · Red <50 · Scores from " + score_date)
