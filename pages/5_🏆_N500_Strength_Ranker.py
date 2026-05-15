@@ -26,14 +26,6 @@ try:
 except ImportError:
     BREEZE_OK = False
 
-# ── Page config ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="N500 Strength Ranker · AlphaRadar",
-    page_icon="🏆",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 # ── Constants ───────────────────────────────────────────────────────────────
 SUPABASE_URL = st.secrets["supabase"]["url"]
 SUPABASE_KEY = st.secrets["supabase"]["key"]
@@ -425,28 +417,32 @@ st.caption(
     "RS / Stage / Volume / Breakout signals · Claude AI one-line justification"
 )
 
-# ── Sidebar controls ──────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Filters & Settings")
-    use_live = st.toggle("🔴 Live Breeze prices", value=True, help="Fetch real-time CMP from Breeze API")
-    use_claude = st.toggle("🤖 Claude AI justifications", value=True, help="One-line AI signal explanation per stock")
-    st.divider()
-    sig_filter = st.multiselect(
-        "Signal filter",
-        ["RS Leader", "Breakout", "Stage 2", "News-Driven⚑", "Vol Surge", "Weak", "Neutral"],
-        default=[],
-    )
-    grade_filter = st.multiselect("Grade filter", ["S", "A", "B", "C"], default=[])
-    sector_filter = st.selectbox("Sector", ["All sectors"])
-    cap_filter = st.selectbox("Cap bucket", ["All", "large", "mid", "small", "micro"])
-    top_n = st.slider("Show top N stocks", 50, 500, 200, step=50)
-    st.divider()
-    st.caption("**Signal legend:**")
-    for sig, (bg, fg) in SIGNAL_COLORS.items():
-        st.markdown(
-            f'<span style="background:{bg};color:{fg};padding:2px 8px;border-radius:4px;font-size:12px">{sig}</span>',
-            unsafe_allow_html=True,
+# ── Inline controls (sidebar disabled inside tab layout) ─────────────────────
+with st.expander("⚙️ Filters & Settings", expanded=False):
+    col_a, col_b, col_c, col_d, col_e = st.columns(5)
+    with col_a:
+        use_live = st.toggle("🔴 Live Breeze prices", value=True)
+        use_claude = st.toggle("🤖 Claude AI justifications", value=True)
+    with col_b:
+        sig_filter = st.multiselect(
+            "Signal filter",
+            ["RS Leader", "Breakout", "Stage 2", "News-Driven⚑", "Vol Surge", "Weak", "Neutral"],
+            default=[],
         )
+    with col_c:
+        grade_filter = st.multiselect("Grade filter", ["S", "A", "B", "C"], default=[])
+    with col_d:
+        cap_filter = st.selectbox("Cap bucket", ["All", "large", "mid", "small", "micro"])
+    with col_e:
+        top_n = st.slider("Show top N stocks", 50, 500, 200, step=50)
+
+st.markdown("---")
+# Signal legend inline
+legend_html = " &nbsp;".join(
+    f'<span style="background:{bg};color:{fg};padding:2px 8px;border-radius:4px;font-size:11px">{sig}</span>'
+    for sig, (bg, fg) in SIGNAL_COLORS.items()
+)
+st.markdown(f"**Signal legend:** &nbsp; {legend_html}", unsafe_allow_html=True)
 
 # ── Load Supabase data ────────────────────────────────────────────────────────
 with st.spinner("Loading scores and universe from Supabase…"):
@@ -544,10 +540,6 @@ master = pd.DataFrame(rows).sort_values("strength_score", ascending=False).reset
 master["rank"] = master.index + 1
 
 # ── Sector filter options (populate after data loads) ─────────────────────────
-sectors = ["All sectors"] + sorted(master["sector"].dropna().unique().tolist())
-# Re-render sector selectbox with real options — use session state trick
-if "sector_sel" not in st.session_state:
-    st.session_state["sector_sel"] = "All sectors"
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
 filt = master.copy()

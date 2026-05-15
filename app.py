@@ -85,11 +85,12 @@ def _run_page(relpath: str):
             st.code(traceback.format_exc())
 
 
-tab_ma, tab_n250, tab_ntm, tab_mp = st.tabs([
+tab_ma, tab_n250, tab_ntm, tab_mp, tab_ranker = st.tabs([
     "🎯  Manas Arora",
     "📊  N250F",
     "◎   Nifty Total Market",
     "📡  Market Pulse",
+    "🏆  N500 Ranker",
 ])
 
 with tab_ma:
@@ -103,3 +104,6 @@ with tab_ntm:
 
 with tab_mp:
     _run_page("pages/4_📡_Market_Pulse.py")
+
+with tab_ranker:
+    _run_page("pages/5_🏆_N500_Strength_Ranker.py")
