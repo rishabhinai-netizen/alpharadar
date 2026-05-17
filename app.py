@@ -85,25 +85,29 @@ def _run_page(relpath: str):
             st.code(traceback.format_exc())
 
 
-tab_ma, tab_n250, tab_ntm, tab_mp, tab_ranker = st.tabs([
+tab_guide, tab_mp, tab_ntm, tab_ranker, tab_ma, tab_n250 = st.tabs([
+    "📖  Guide",
+    "📡  Market Pulse",
+    "◎   Nifty Total Market",
+    "🏆  N500 Ranker",
     "🎯  Manas Arora",
     "📊  N250F",
-    "◎   Nifty Total Market",
-    "📡  Market Pulse",
-    "🏆  N500 Ranker",
 ])
+
+with tab_guide:
+    _run_page("pages/guide.py")
+
+with tab_mp:
+    _run_page("pages/4_📡_Market_Pulse.py")
+
+with tab_ntm:
+    _run_page("pages/_nifty_total_market.py")
+
+with tab_ranker:
+    _run_page("pages/5_🏆_N500_Strength_Ranker.py")
 
 with tab_ma:
     _run_page("pages/manas_arora.py")
 
 with tab_n250:
     _run_page("pages/3_📊_N250F.py")
-
-with tab_ntm:
-    _run_page("pages/_nifty_total_market.py")
-
-with tab_mp:
-    _run_page("pages/4_📡_Market_Pulse.py")
-
-with tab_ranker:
-    _run_page("pages/5_🏆_N500_Strength_Ranker.py")

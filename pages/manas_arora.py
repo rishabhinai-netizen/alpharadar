@@ -517,6 +517,20 @@ with TAB_SCANNER:
     st.markdown("### 🔍 Manas Arora Weekly Scanner")
     st.markdown("Applies all 7 core criteria + Purple Dot + Volatility Contraction. Run on weekends to build your Focus List.")
 
+    # ── Universe coverage warning ──
+    universe_size = len(NSE_UNIVERSE)
+    if universe_size >= 200:
+        st.info(f"🌐 **Universe loaded from Supabase:** {universe_size} stocks available to scan. This is the full ar_universe — broadest possible coverage.")
+    else:
+        st.warning(
+            f"⚠️ **Limited universe ({universe_size} stocks):** Using hardcoded fallback list. "
+            f"The Manas Arora scanner is designed to scan the full NSE universe (~750 stocks) "
+            f"but Breeze API limits live OHLCV fetching to a practical ~200 stocks per session "
+            f"(each stock = 1 API call, ~400-day history). "
+            f"To scan more stocks, reduce 'Scan Universe Size' in batches or run on weekends. "
+            f"For full-universe daily scores, use **◎ Nifty Total Market** or **🏆 N500 Ranker** tabs instead."
+        )
+
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         min_score = st.slider("Minimum Score", 0, 100, 50, 5, key="ma_min_score")

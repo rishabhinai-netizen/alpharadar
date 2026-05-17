@@ -217,8 +217,11 @@ with hc2:
     if st.button("🔄 Refresh",use_container_width=True, key="mp_refresh_btn"):
         st.cache_data.clear(); st.rerun()
 
-with st.spinner("Loading…"):
-    df_raw, pulse_date = load_pulse()
+_load_placeholder = st.empty()
+with _load_placeholder.container():
+    st.info("⏳ Loading Market Pulse data from Supabase…")
+df_raw, pulse_date = load_pulse()
+_load_placeholder.empty()
 
 # ── EMPTY STATE ───────────────────────────────
 if df_raw.empty:
@@ -226,8 +229,9 @@ if df_raw.empty:
     <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px 24px;margin:12px 0">
       <h3 style="margin:0 0 8px;color:#0c4a6e">📡 First-Time Setup Required</h3>
       <p style="color:#075985;font-size:14px;margin:0 0 10px">
-        Click <b>Initialize</b> to scan all NSE stocks and store results in Supabase.
-        Runs once (~5–8 minutes). After that, this page loads <b>instantly</b> every day.
+        The <b>ar_market_pulse</b> Supabase table is empty. Click <b>Initialize</b> to scan
+        all NSE stocks and store results (~5–8 minutes). After that, this page loads
+        <b>instantly</b> every day — the daily cron keeps it updated automatically.
       </p>
       <p style="color:#075985;font-size:13px;margin:0">
         ✅ NSE rebalances indices every 6 months → universe stays current automatically<br>
@@ -235,7 +239,8 @@ if df_raw.empty:
         ✅ Breeze API not needed here — yfinance is sufficient for EOD analysis
       </p>
     </div>""",unsafe_allow_html=True)
-    if st.button("🚀 Initialize Market Pulse (run once)",type="primary"):
+    st.warning("⚠️ **Universe coverage note:** Market Pulse covers ~1000 NSE stocks. This is its designed scope — it does NOT use Breeze live data.")
+    if st.button("🚀 Initialize Market Pulse (run once — ~5-8 min)",type="primary", key="mp_init_btn"):
         from market_pulse_engine import run_market_pulse
         pb=st.progress(0,"Starting…"); sb=st.empty()
         def cb(p,m): pb.progress(int(p),m); sb.info(f"⏳ {m}")

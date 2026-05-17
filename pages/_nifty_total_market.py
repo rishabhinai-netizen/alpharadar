@@ -119,9 +119,22 @@ def load_score_history():
         return dates
     return []
 
+_ntm_placeholder = st.empty()
+with _ntm_placeholder.container():
+    st.info("⏳ Loading scores from Supabase…")
 df, score_date = load_scores()
 universe = load_universe()
 history_dates = load_score_history()
+_ntm_placeholder.empty()
+
+if df.empty:
+    st.error("No scores in database.")
+    st.info("""
+    **To get started:** Go to **⚡ Run Scoring** in the sidebar → click **🚀 Initial Load**.
+    Takes ~15 minutes. After that, daily updates run automatically at 4:45 PM IST.
+    """)
+    st.warning("⚠️ **Universe:** This tab covers all ~750 Nifty Total Market stocks scored by the daily cron.")
+    st.stop()
 
 # ── HEADER ──
 c1, c2 = st.columns([3, 1])
@@ -161,14 +174,6 @@ if not df.empty and "symbol" in df.columns:
         live_count = len([v for v in live_prices.values() if v])
         st.caption(f"⚡ Live prices loaded for **{live_count}** stocks via {'Breeze' if live_prices else 'yfinance'}")
 
-if df.empty:
-    st.error("No scores in database.")
-    st.info("""
-    **To get started:** Go to **⚡ Run Scoring** in the sidebar → click **🚀 Initial Load**.
-    Takes ~15 minutes. After that, daily updates run automatically at 4:45 PM IST.
-    """)
-    st.stop()
-
 if universe:
     df["company_name"] = df["symbol"].map(lambda s: universe.get(s, {}).get("company_name", ""))
     df["industry"]     = df["symbol"].map(lambda s: universe.get(s, {}).get("industry", ""))
@@ -191,42 +196,52 @@ st.divider()
 
 # ── TODAY'S HIGHLIGHTS ──
 if "stage_changed" in df.columns and "weinstein_stage" in df.columns:
-    stage_changed = df[df.get("stage_changed", False) == True] if "stage_changed" in df.columns else pd.DataFrame()
+    stage_changed = df[df["stage_changed"] == True]
     new_stage2 = stage_changed[stage_changed["weinstein_stage"].isin(["2A","2B"])] if not stage_changed.empty else pd.DataFrame()
     new_stage4 = stage_changed[stage_changed["weinstein_stage"] == "4"] if not stage_changed.empty else pd.DataFrame()
+    new_stage1b = stage_changed[stage_changed["weinstein_stage"] == "1B"] if not stage_changed.empty else pd.DataFrame()
     top_rs_stars = df[
-        (df.get("rs_new_high", False) == True) &
+        (df["rs_new_high"] == True) &
         (df["weinstein_stage"].isin(["2A","2B"]))
     ].sort_values("composite_score", ascending=False).head(5) if "rs_new_high" in df.columns else pd.DataFrame()
 
-    if not new_stage2.empty or not new_stage4.empty or not top_rs_stars.empty:
+    if not new_stage2.empty or not new_stage4.empty or not top_rs_stars.empty or not new_stage1b.empty:
+        # Main 3 panels — matches the 3 Telegram messages
         h1, h2, h3 = st.columns(3)
         with h1:
             if not new_stage2.empty:
                 st.success(f"🟢 **{len(new_stage2)} New Buy Signals** (entered Stage 2)")
-                for _, r in new_stage2.head(5).iterrows():
+                st.caption("These match your ACTION REQUIRED Telegram message")
+                for _, r in new_stage2.sort_values("composite_score", ascending=False).iterrows():
                     st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%")
             else:
                 st.info("No new Stage 2 entries today")
         with h2:
             if not new_stage4.empty:
                 st.error(f"🔴 **{len(new_stage4)} Sell Signals** (entered Stage 4)")
-                for _, r in new_stage4.head(5).iterrows():
+                for _, r in new_stage4.sort_values("composite_score").iterrows():
                     st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f}")
             else:
                 st.info("No new Stage 4 entries today")
         with h3:
-            if not top_rs_stars.empty:
+            if not new_stage1b.empty:
+                st.warning(f"👀 **{len(new_stage1b)} Watchlist** (moved to Stage 1B)")
+                st.caption("These match your WATCHLIST Telegram message")
+                for _, r in new_stage1b.sort_values("composite_score", ascending=False).head(5).iterrows():
+                    st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%")
+            elif not top_rs_stars.empty:
                 st.markdown("⭐ **Top Stage 2 + RS New High** (strongest leaders)")
                 for _, r in top_rs_stars.iterrows():
                     st.write(f"▸ **{r['symbol']}** Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%")
             else:
-                st.info("No Stage 2 RS new highs today")
+                st.info("No Stage 1B movers today")
         st.divider()
 
 # ── FILTERS ──
-fc1, fc2, fc3, fc4, fc5 = st.columns([2.5, 1, 1, 1, 1])
+fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([2.5, 1, 1, 1, 1, 1.2])
 with fc1: search = st.text_input("Search", "", placeholder="Symbol or company...", label_visibility="collapsed", key="ntm_search")
+with fc6:
+    show_changed = st.checkbox("🔄 Stage changed today", value=False, key="ntm_changed")
 with fc2: bf = st.selectbox("Bucket", ["All"] + list(BCFG.keys()), label_visibility="collapsed", key="ntm_bucket")
 with fc3: sf = st.selectbox("Stage", ["All","2A","2B","1B","1A","3","4"], label_visibility="collapsed", key="ntm_stage")
 with fc4: cf = st.selectbox("Cap", ["All","large","mid","small","micro"], label_visibility="collapsed", key="ntm_cap")
@@ -242,6 +257,7 @@ if search:
 if bf != "All": fdf = fdf[fdf["bucket"] == bf]
 if sf != "All": fdf = fdf[fdf["weinstein_stage"] == sf]
 if cf != "All" and "cap_bucket" in fdf.columns: fdf = fdf[fdf["cap_bucket"] == cf]
+if show_changed and "stage_changed" in fdf.columns: fdf = fdf[fdf["stage_changed"] == True]
 
 sm = {"Score ↓":("composite_score",False),"RS% ↓":("rs_percentile",False),
       "Chg% ↓":("price_change_pct",False),"Score ↑":("composite_score",True)}

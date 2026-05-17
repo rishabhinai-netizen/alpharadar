@@ -344,11 +344,24 @@ def etag(label):
 st.title("🏆 N500 Strength Ranker")
 st.caption("Strongest stocks ranked #1 · Scores from AlphaRadar engine · Live prices & AI on button click")
 
-# Load data
+# Load data — show explicit loading state so tab doesn't appear blank
+_ranker_placeholder = st.empty()
+if "ranker_v5" not in st.session_state:
+    with _ranker_placeholder.container():
+        st.info("⏳ Loading scores from Supabase… (first load takes ~3 seconds, then cached for this session)")
 scores_df, score_date, uni, cached_just = get_data()
+_ranker_placeholder.empty()
 
 if scores_df is None or scores_df.empty:
-    st.error("⚠️ No scores found. Run **⚡ Run Scoring** tab first.")
+    st.error("⚠️ No scores found in Supabase.")
+    st.info("""
+    **To fix:** The daily cron writes scores to Supabase after market close.
+    If you're seeing this during market hours, scores from yesterday should be available.
+    
+    **Manual fix:** Go to **⚡ Run Scoring** tab → click **🚀 Initial Load** (takes ~15 min).
+    After that, the GitHub Actions cron keeps scores updated daily at 4:45 PM IST.
+    """)
+    st.warning("⚠️ **Universe coverage:** N500 Ranker scores up to 800 stocks from ar_daily_scores. The Manas Arora scanner covers only ~200 stocks due to Breeze API rate limits.")
     st.stop()
 
 # Build master (cached in session_state)
