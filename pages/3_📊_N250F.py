@@ -16,17 +16,25 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
+    st.set_page_config(page_title="N250F — AlphaRadar", page_icon="📊", layout="wide")
+except Exception:
+    pass
+
+@st.cache_data(show_spinner=False)
+def _load_n250f_cached():
     from n250f_data import load_n250f_data
-    DATA = load_n250f_data()
+    return load_n250f_data()
+
+_n250f_placeholder = st.empty()
+with _n250f_placeholder.container():
+    st.info("⏳ Loading N250F backtest data (first load may take ~10 seconds, then cached)…")
+try:
+    DATA = _load_n250f_cached()
     DATA_LOADED = True
 except Exception as e:
     DATA_LOADED = False
     DATA_ERR = str(e)
-
-try:
-    st.set_page_config(page_title="N250F — AlphaRadar", page_icon="📊", layout="wide")
-except Exception:
-    pass
+_n250f_placeholder.empty()
 
 # ── LIGHT THEME — matches AlphaRadar main page ────────────────────────────────
 st.markdown("""
@@ -123,11 +131,12 @@ vault_tab, live_tab = st.tabs([
 # SECTION 1 — BACKTEST VAULT
 # ═══════════════════════════════════════════════════════════════════════════════
 with vault_tab:
-    t1, t2, t3, t4, t5 = st.tabs([
+    t1, t2, t3, t4, t5, t6 = st.tabs([
         "📈 Growth & Overview",
         "📅 Rebalance Explorer",
         "📋 Trade-by-Trade P&L",
         "📊 Year-by-Year",
+        "📆 Period P&L",
         "💾 Export",
     ])
 
@@ -204,11 +213,11 @@ with vault_tab:
         st.caption(f"{len(rebals)} fortnightly rebalances · Jun 2015 – May 2026")
 
         rebal_dates = [r['dt'] for r in rebals]
-        sel_date = st.select_slider(
+        sel_date = st.selectbox(
             "Select rebalance date",
             options=rebal_dates,
-            value=rebal_dates[-1],
-            label_visibility="collapsed",
+            index=len(rebal_dates)-1,
+            key="n250f_rebal_sel",
         )
 
         sel = next((r for r in rebals if r['dt'] == sel_date), None)
@@ -298,9 +307,20 @@ with vault_tab:
     with t3:
         st.subheader(f"All {perf['total_trades']} closed trades — real entry & exit prices")
 
+        st.warning("""
+        ⚠️ **Data Quality Note — 1 Corporate Action Artifact Detected:**
+        **MOTILALOFS** entry Dec 18, 2023 @ ₹1,211 → exit Jan 1, 2024 @ ₹307 (-74.6%) is a **DATA ARTIFACT, NOT a real loss.**
+        MOTILALOFS had a **4:1 stock split** on Jan 2, 2024. yfinance correctly adjusted the exit price (₹1,240÷4 ≈ ₹310)
+        but the entry price was stored from adjusted historical data, creating a false -74.6% loss.
+        All other extreme moves (AUBANK -54%, VMART -40% in March 2020) are legitimate COVID crash trades.
+        The TANLA +1274% and ADANIENT +393% trades are genuine multi-year gains held through momentum.
+        **Impact on reported CAGR:** This artifact artificially DEFLATES the true CAGR by ~2.5-3%.
+        """)
+
         all_sells = []
         for r in rebals:
             for s in r['sells']:
+                is_flagged = s['t'] == 'MOTILALOFS' and s['xd'] == '2024-01-01'
                 all_sells.append({
                     'Exit Date':  s['xd'],
                     'Ticker':     s['t'],
@@ -310,6 +330,7 @@ with vault_tab:
                     'Return %':   s['pct'],
                     'P&L ₹':      s['pnl'],
                     'Hold Days':  s['days'],
+                    'Flag':       '⚠️ Split artifact' if is_flagged else '',
                 })
         trade_df = pd.DataFrame(all_sells).sort_values('Exit Date', ascending=False)
 
@@ -432,8 +453,75 @@ with vault_tab:
                             unsafe_allow_html=True,
                         )
 
-    # ── EXPORT ────────────────────────────────────────────────────────────────
+    # ── PERIOD P&L ────────────────────────────────────────────────────────────
     with t5:
+        st.subheader("📆 Every 15-day Period — Realised & Unrealised P&L")
+        st.caption("Each row = one fortnightly rebalance period. Shows if those 15 days were profitable.")
+
+        period_rows = []
+        for i, r in enumerate(rebals):
+            snap = r.get('snap', [])
+            sells = r.get('sells', [])
+            realised_pnl = sum(s.get('pnl', 0) for s in sells)
+            unrealised_pnl = sum(h.get('upnl', 0) for h in snap)
+            total_pnl = realised_pnl + unrealised_pnl
+            period_rows.append({
+                'Period #': i + 1,
+                'Date': r['dt'],
+                'Portfolio Value (₹)': r.get('ve', 0),
+                'Period Return %': r.get('ret', 0),
+                'Period Profitable': '✅ Yes' if r.get('ret', 0) >= 0 else '❌ No',
+                'Stocks In': len(r.get('ents', [])),
+                'Stocks Out': len(r.get('exts', [])),
+                'Realised P&L (₹)': round(realised_pnl, 0),
+                'Unrealised P&L (₹)': round(unrealised_pnl, 0),
+                'Total P&L (₹)': round(total_pnl, 0),
+                'Turnover %': r.get('to', 0),
+            })
+
+        period_df = pd.DataFrame(period_rows)
+        pos_periods = (period_df['Period Return %'] >= 0).sum()
+        neg_periods = (period_df['Period Return %'] < 0).sum()
+        avg_pos = period_df[period_df['Period Return %'] >= 0]['Period Return %'].mean()
+        avg_neg = period_df[period_df['Period Return %'] < 0]['Period Return %'].mean()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Profitable periods", f"{pos_periods}/{len(period_df)}", f"{pos_periods/len(period_df)*100:.0f}%")
+        c2.metric("Loss periods", str(neg_periods))
+        c3.metric("Avg gain period", f"+{avg_pos:.2f}%")
+        c4.metric("Avg loss period", f"{avg_neg:.2f}%")
+
+        st.dataframe(
+            period_df, use_container_width=True, hide_index=True, height=400,
+            column_config={
+                'Portfolio Value (₹)':  st.column_config.NumberColumn(format='₹%,.0f'),
+                'Period Return %':      st.column_config.NumberColumn(format='%+.2f%%'),
+                'Realised P&L (₹)':     st.column_config.NumberColumn(format='₹%+,.0f'),
+                'Unrealised P&L (₹)':   st.column_config.NumberColumn(format='₹%+,.0f'),
+                'Total P&L (₹)':        st.column_config.NumberColumn(format='₹%+,.0f'),
+            },
+        )
+
+        # Chart: period returns
+        fig_pr = go.Figure(go.Bar(
+            x=period_df['Date'],
+            y=period_df['Period Return %'],
+            marker_color=['#059669' if v >= 0 else '#dc2626' for v in period_df['Period Return %']],
+            hovertemplate='%{x}: %{y:+.2f}%<extra></extra>',
+        ))
+        fig_pr.update_layout(
+            title="Every 15-day period return",
+            height=300,
+            margin=dict(l=10, r=10, t=40, b=20),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            yaxis_title="Return %",
+        )
+        fig_pr.add_hline(y=0, line_dash='dot', line_color='#9ca3af')
+        st.plotly_chart(fig_pr, use_container_width=True)
+
+    # ── EXPORT ────────────────────────────────────────────────────────────────
+    with t6:
         st.subheader("Export backtest data")
 
         sells_exp = []
@@ -537,6 +625,14 @@ with live_tab:
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+    st.info("""
+    ⏰ **When to act on the rebalance date:**
+    - **Signals available:** Evening of the day BEFORE the rebalance date (e.g., May 18 evening for May 19 rebalance)
+    - **When to execute:** At market OPEN (9:15 AM IST) on the rebalance date (May 19)
+    - **How signals are generated:** yfinance fetches previous close prices → ranks Nifty 250 by 63-day return → top 20 = buy list
+    - **The "Likely changes" section below** shows the pre-computed entry/exit list for the NEXT rebalance date
+    """)
 
     st.divider()
 
@@ -714,6 +810,126 @@ with live_tab:
 - Record each trade: date, ticker, buy/sell, price, qty
 - Never override the signal based on news or gut feel — the edge is in consistency
         """)
+
+    st.divider()
+
+    # ── LIVE PORTFOLIO TRACKER (Starting May 19, 2026) ───────────────────────
+    st.subheader("📒 My Live Portfolio Tracker — Starting May 19, 2026")
+    st.caption("Personal record of your actual N250F trades. Add entry prices manually after execution.")
+
+    import json
+
+    TRACKER_KEY = "n250f_live_tracker"
+
+    # Initialize session state
+    if TRACKER_KEY not in st.session_state:
+        st.session_state[TRACKER_KEY] = {
+            'start_date': '2026-05-19',
+            'start_capital': 1_000_000,
+            'positions': [],  # list of {ticker, entry_date, entry_price, shares, capital_deployed}
+            'closed': [],     # list of closed trades
+        }
+
+    tracker = st.session_state[TRACKER_KEY]
+
+    # ── Setup row
+    cap_col, _ = st.columns([1, 3])
+    with cap_col:
+        cap_input = st.number_input(
+            "Starting capital (₹)", min_value=100000, max_value=100000000,
+            value=tracker['start_capital'], step=50000, format="%d",
+            key="n250f_start_cap"
+        )
+        if cap_input != tracker['start_capital']:
+            tracker['start_capital'] = cap_input
+
+    # ── The May 19 stocks
+    may19_stocks = [e for e in pot_entries] if pot_entries else []
+
+    st.info(f"""
+    **May 19 Rebalance — Action Required:**
+    - 🟢 **BUY** (new entries): {', '.join(may19_stocks) if may19_stocks else 'See "Likely changes" above'}
+    - 🔴 **SELL** (exits): {', '.join(pot_exits) if pot_exits else 'See above'}
+    - **Capital per stock:** ₹{tracker['start_capital'] / 20:,.0f} (5% each of ₹{tracker['start_capital']:,})
+    """)
+
+    # ── Add position
+    with st.expander("➕ Record a trade execution", expanded=False):
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1:
+            new_ticker = st.text_input("Ticker", placeholder="e.g. NEULANDLAB", key="lv_ticker").upper()
+        with tc2:
+            new_date = st.text_input("Execution date", value="2026-05-19", key="lv_date")
+        with tc3:
+            new_price = st.number_input("Execution price (₹)", min_value=0.01, value=100.0, step=0.05, key="lv_price")
+
+        cap_deployed = tracker['start_capital'] / 20
+        shares = cap_deployed / new_price if new_price > 0 else 0
+        st.caption(f"Shares to buy: {shares:.2f} | Capital deployed: ₹{cap_deployed:,.0f}")
+
+        if st.button("Add position", key="lv_add") and new_ticker:
+            tracker['positions'].append({
+                'ticker': new_ticker,
+                'entry_date': new_date,
+                'entry_price': new_price,
+                'shares': round(shares, 4),
+                'capital': round(cap_deployed, 2),
+            })
+            st.success(f"Added {new_ticker} @ ₹{new_price}")
+            st.rerun()
+
+    # ── Display live positions
+    if tracker['positions']:
+        st.markdown("**Open positions:**")
+        pos_rows = []
+        for p in tracker['positions']:
+            # Use last known price from curr portfolio if available
+            known_price = next((s['current_price'] for s in curr if s['ticker'] == p['ticker']), p['entry_price'])
+            cmp = known_price
+            current_val = p['shares'] * cmp
+            unrealised_pnl = current_val - p['capital']
+            unrealised_pct = (unrealised_pnl / p['capital']) * 100
+            pos_rows.append({
+                'Ticker': p['ticker'],
+                'Entry Date': p['entry_date'],
+                'Entry ₹': p['entry_price'],
+                'CMP ₹': round(cmp, 2),
+                'Shares': p['shares'],
+                'Capital (₹)': p['capital'],
+                'Current Val (₹)': round(current_val, 2),
+                'Unrealised P&L (₹)': round(unrealised_pnl, 2),
+                'Return %': round(unrealised_pct, 2),
+            })
+
+        pos_df = pd.DataFrame(pos_rows)
+        total_invested = pos_df['Capital (₹)'].sum()
+        total_current = pos_df['Current Val (₹)'].sum()
+        total_pnl = total_current - total_invested
+        total_pct = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Positions", len(pos_df))
+        m2.metric("Total invested", f"₹{total_invested:,.0f}")
+        m3.metric("Current value", f"₹{total_current:,.0f}")
+        m4.metric("Unrealised P&L", f"₹{total_pnl:+,.0f}", f"{total_pct:+.2f}%")
+
+        st.dataframe(
+            pos_df, use_container_width=True, hide_index=True,
+            column_config={
+                'Entry ₹': st.column_config.NumberColumn(format='₹%.2f'),
+                'CMP ₹': st.column_config.NumberColumn(format='₹%.2f'),
+                'Capital (₹)': st.column_config.NumberColumn(format='₹%,.0f'),
+                'Current Val (₹)': st.column_config.NumberColumn(format='₹%,.0f'),
+                'Unrealised P&L (₹)': st.column_config.NumberColumn(format='₹%+,.0f'),
+                'Return %': st.column_config.NumberColumn(format='%+.2f%%'),
+            },
+        )
+
+        if st.button("🗑️ Clear all positions (reset tracker)", key="lv_clear"):
+            st.session_state[TRACKER_KEY]['positions'] = []
+            st.rerun()
+    else:
+        st.info("No positions recorded yet. Add your May 19 executions above after buying.")
 
 # ── DISCLAIMER ────────────────────────────────────────────────────────────────
 st.markdown("""
