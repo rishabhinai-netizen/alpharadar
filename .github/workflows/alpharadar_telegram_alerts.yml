@@ -1,0 +1,105 @@
+name: AlphaRadar Telegram Alerts
+
+on:
+  # ── SCHEDULED RUNS ─────────────────────────────────────────────
+  # IST = UTC + 5:30
+  schedule:
+    # 8:30 AM IST (3:00 AM UTC) — Pre-market brief
+    - cron: "0 3 * * 1-5"
+    # 9:20 AM IST (3:50 AM UTC) — Market-open signals (fresh BUY NOW)
+    - cron: "50 3 * * 1-5"
+    # 12:30 PM IST (7:00 AM UTC) — Midday check (sell signals / fresh breaks)
+    - cron: "0 7 * * 1-5"
+    # 3:45 PM IST (10:15 AM UTC) — End-of-day summary
+    - cron: "15 10 * * 1-5"
+
+  # ── MANUAL TRIGGER ──────────────────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Alert mode"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full       # Full cycle: all strategies + synthesis
+          - signals    # Buy signals only
+          - sell       # Sell signals only
+          - test       # Test ping only
+
+# Cancel any in-progress run when a new one starts
+concurrency:
+  group: alpharadar-alerts
+  cancel-in-progress: false
+
+jobs:
+  telegram-alerts:
+    name: Send AlphaRadar Alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            yfinance==0.2.51 \
+            requests==2.32.3 \
+            numpy==1.26.4 \
+            pandas==2.2.2 \
+            scipy==1.13.1 \
+            --quiet
+
+      - name: Run Telegram Alert Cycle
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          # KOTAK_SESSION_ID is NOT stored — refresh daily manually
+          # To use, trigger workflow_dispatch with session from ICICIDirect
+          KOTAK_SESSION_ID:     ${{ secrets.KOTAK_SESSION_ID }}
+          ALERT_MODE:           ${{ inputs.mode || 'full' }}
+        run: |
+          python -c "
+          import os, sys
+          sys.path.insert(0, '.')
+          from alpharadar_telegram_bot import run_full_alert_cycle, send_tg, fetch_latest_scores, build_fresh_sell_message, enrich_with_live_prices
+
+          mode = os.environ.get('ALERT_MODE', 'full')
+          print(f'Running in mode: {mode}')
+
+          if mode == 'test':
+              send_tg('✅ AlphaRadar GitHub Actions — connection OK!')
+          elif mode == 'sell':
+              result = fetch_latest_scores()
+              if result:
+                  scores, date = result
+                  sells = [r for r in scores if r['bucket'] == 'SELL']
+                  stored = {r['symbol']: r['price'] for r in scores}
+                  lives = enrich_with_live_prices([r['symbol'] for r in sells[:20]], stored)
+                  msg = build_fresh_sell_message(scores, lives, date)
+                  send_tg(msg)
+          elif mode == 'signals':
+              run_full_alert_cycle()
+          else:
+              run_full_alert_cycle()
+          "
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alert-log-${{ github.run_number }}
+          retention-days: 7
+          path: |
+            *.log
