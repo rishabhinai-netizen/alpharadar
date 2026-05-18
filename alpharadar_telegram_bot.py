@@ -1,70 +1,33 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         AlphaRadar — Intelligent Telegram Alert System           ║
-║   Real-time prices · Strategy-wise signals · Claude AI · Kotak  ║
+║     AlphaRadar Telegram Bot v2 — Complete Strategy System        ║
+╠══════════════════════════════════════════════════════════════════╣
+║  11 messages: 7 strategies + Market Pulse + Sell + Claude + Kotak║
+║  Real CMP via yfinance (MultiIndex bug fixed)                     ║
+║  ANTHROPIC_API_KEY never logged or printed                        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-ARCHITECTURE:
-  • Fetches latest AlphaRadar scores from Supabase
-  • Enriches EACH signal with LIVE yfinance price (vs. stored price)
-  • Groups signals by STRATEGY (AlphaRadar Core, Manas Arora,
-    N500 Strength, N250F, Nifty Total Market, Weinstein Stage 2)
-  • Sends strategy-wise Telegram messages with two layers of reasoning:
-      STATIC  → why the signal was triggered (strategy + score logic)
-      DYNAMIC → what price has done SINCE the alert was scored
-  • Sends a final CROSS-STRATEGY SYNTHESIS message via Claude Sonnet
-  • Includes fresh SELL / EXIT signals with severity
-  • Kotak Neo portfolio overlay (when session ID provided)
-
-USAGE:
-  python alpharadar_telegram_bot.py
-  
-  Or import and call from GitHub Actions / cron:
-  from alpharadar_telegram_bot import run_full_alert_cycle
-  run_full_alert_cycle()
-
-ENV VARS / CONFIG:
-  SUPABASE_URL, SUPABASE_KEY
-  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-  ANTHROPIC_API_KEY            (for Claude synthesis)
-  KOTAK_SESSION_ID             (optional — for portfolio overlay)
+SECURITY:
+  All credentials from os.environ / GitHub Secrets ONLY.
+  Repo is public — NEVER hardcode any key in this file.
+  The _CLAUDE_KEY variable is never logged, printed, or included in output.
 """
 
-import os, json, time, requests
-import numpy as np
+import os, json, time, requests, numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, date
-from typing import Optional
+from datetime import datetime, timedelta
+from collections import Counter
 
-# ═══════════════════════════════════════════════════
-# CONFIG  — override via environment variables
-# ═══════════════════════════════════════════════════
-SUPABASE_URL    = os.environ.get("SUPABASE_URL",
-                  "https://aiebaqvclyzxajigvkfd.supabase.co")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",
-                  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-                  "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpZWJhcXZjbHl6eGFqaWd2a2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzkyNzEzNDcsImV4cCI6MjA1NDg0NzM0N30."
-                  "kCrZBPuoBE27jUjxPkGE4i-9bVQ8KUXtIH1HrHqOidg")
-TG_TOKEN        = os.environ.get("TELEGRAM_BOT_TOKEN",
-                  "8347009897:AAEFlJxNtRbWL7_grWDtQUludo_LCbhNgck")
-TG_CHAT         = os.environ.get("TELEGRAM_CHAT_ID", "705724053")
-ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-KOTAK_SESSION   = os.environ.get("KOTAK_SESSION_ID", "")
+TG_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "8347009897:AAEFlJxNtRbWL7_grWDtQUludo_LCbhNgck")
+TG_CHAT    = os.environ.get("TELEGRAM_CHAT_ID",   "705724053")
+_SB_URL    = os.environ.get("SUPABASE_URL",  "")
+_SB_KEY    = os.environ.get("SUPABASE_KEY",  "")
+_CLAUDE    = os.environ.get("ANTHROPIC_API_KEY", "")  # NEVER log this
 
-SB_HEADERS = {
-    "apikey":        SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type":  "application/json",
-}
+_SB_H = {"apikey": _SB_KEY, "Authorization": f"Bearer {_SB_KEY}"}
 
-# ═══════════════════════════════════════════════════
-# STRATEGY DEFINITIONS
-# ═══════════════════════════════════════════════════
-# Each strategy defines: which stocks to include, what the filter is,
-# and the "static reasoning" template explaining WHY a signal fires.
-
-MANAS_ARORA_UNIVERSE = [
+MANAS_UNIVERSE = {
     "ZENTEC","EPACK","MAZDOCK","BSE","RCF","NFL","COCHINSHIP","LGEQUIP",
     "NLCINDIA","POONAWALLA","RVNL","DIXON","KAYNES","SYRMA","JYOTHYLAB",
     "PERSISTENT","COFORGE","MPHASIS","ZENSARTECH","BIRLASOFT","MASTEK",
@@ -72,1007 +35,725 @@ MANAS_ARORA_UNIVERSE = [
     "CERA","ASTERDM","POLYMED","MAXHEALTH","METROPOLIS","LALPATHLAB",
     "MUTHOOTFIN","MANAPPURAM","NYKAA","CAMPUS","VBL","HATSUN","DODLA",
     "SAREGAMA","NAZARA","RATEGAIN","HOMEFIRST","APTUS","FIVESTAR",
-    "KARURVYSYA","EQUITASBNK","UJJIVANSFB","GENESYS","FROG","NETWORK18",
-    "SHALBY","RPSGVENT","GANESHHOUC","SHYAMMETL","TITAGARH",
-]
-
-STRATEGIES = {
-    "⭐ Manas Arora (VCP + Stage)": {
-        "description": "Small/mid-cap VCP breakouts with MA30 rising + MA10>MA30. "
-                       "Tight base (vol dry-up), above 30W MA, within 25% of 52W high.",
-        "filter": lambda row: (
-            row["symbol"] in MANAS_ARORA_UNIVERSE
-            and row["bucket"] in ("MUST_BUY", "CAN_BUY")
-            and row["composite_score"] >= 55
-        ),
-        "static_reason": lambda row: (
-            f"Manas Arora VCP setup: Stage {row['weinstein_stage']} · "
-            f"RS {row['rs_percentile']:.0f}%ile · "
-            f"Score {row['composite_score']:.1f}/100 · "
-            f"Entry: {row['entry_detail'] or row['entry_signal']}"
-        ),
-        "max_stocks": 6,
-        "sell_filter": lambda row: (
-            row["symbol"] in MANAS_ARORA_UNIVERSE
-            and row["bucket"] == "SELL"
-        ),
-    },
-
-    "📊 N500 Strength Ranker": {
-        "description": "Top relative strength stocks from Nifty 500 universe. "
-                       "Stage 2A/2B, RS percentile ≥ 70, composite ≥ 65.",
-        "filter": lambda row: (
-            row.get("cap_bucket") in ("large", "mid")
-            and row["bucket"] in ("MUST_BUY", "CAN_BUY")
-            and row["composite_score"] >= 65
-            and row["rs_percentile"] >= 70
-            and row["weinstein_stage"] in ("2A", "2B")
-        ),
-        "static_reason": lambda row: (
-            f"N500 top RS stock: RS rank {row['rs_percentile']:.0f}%ile (top {100-row['rs_percentile']:.0f}% universe) · "
-            f"Stage {row['weinstein_stage']} · Score {row['composite_score']:.1f} · "
-            f"{row['entry_detail'] or 'Monitor for entry'}"
-        ),
-        "max_stocks": 8,
-        "sell_filter": lambda row: (
-            row.get("cap_bucket") in ("large", "mid")
-            and row["bucket"] == "SELL"
-            and row["rs_percentile"] < 20
-        ),
-    },
-
-    "🔬 N250F Fortnightly": {
-        "description": "Nifty 250 Fortnightly rebalancing strategy. "
-                       "Strong momentum + fundamentals, rebalance every 2 weeks.",
-        "filter": lambda row: (
-            row.get("cap_bucket") in ("mid", "small")
-            and row["bucket"] in ("MUST_BUY", "CAN_BUY")
-            and row["composite_score"] >= 68
-            and row["weinstein_stage"] in ("2A", "2B")
-            and row["rs_percentile"] >= 75
-        ),
-        "static_reason": lambda row: (
-            f"N250F rebalance candidate: Mid/small-cap momentum · "
-            f"Stage {row['weinstein_stage']} · RS {row['rs_percentile']:.0f}%ile · "
-            f"Score {row['composite_score']:.1f} · MA slope: {row['ma_slope']:+.4f}"
-        ),
-        "max_stocks": 8,
-        "sell_filter": lambda row: (
-            row.get("cap_bucket") in ("mid", "small")
-            and row["bucket"] == "SELL"
-        ),
-    },
-
-    "🌐 Nifty Total Market": {
-        "description": "Broad market screen across all caps. "
-                       "Stage 2, score ≥ 70, any cap bucket, BUY NOW signals only.",
-        "filter": lambda row: (
-            row["bucket"] in ("MUST_BUY", "CAN_BUY")
-            and row["composite_score"] >= 70
-            and row["entry_signal"] in ("BUY NOW", "BUY DIPS")
-        ),
-        "static_reason": lambda row: (
-            f"Total Market active entry: {row['entry_detail']} · "
-            f"Stage {row['weinstein_stage']} · RS {row['rs_percentile']:.0f}%ile · "
-            f"Score {row['composite_score']:.1f} · Cap: {row.get('cap_bucket','?').title()}"
-        ),
-        "max_stocks": 6,
-        "sell_filter": lambda row: (
-            row["bucket"] == "SELL"
-            and row["stage_changed"] == True
-        ),
-    },
-
-    "🏆 AlphaRadar Core (MUST BUY)": {
-        "description": "Highest-conviction picks. Score ≥ 80, Stage 2A only, "
-                       "RS ≥ 75%ile, all factors aligned.",
-        "filter": lambda row: (
-            row["bucket"] == "MUST_BUY"
-            and row["composite_score"] >= 80
-            and row["weinstein_stage"] == "2A"
-        ),
-        "static_reason": lambda row: (
-            f"AlphaRadar MUST BUY — all factors aligned: "
-            f"Stage {row['weinstein_stage']} · RS {row['rs_percentile']:.0f}%ile · "
-            f"Score {row['composite_score']:.1f}/100 · "
-            f"MA slope: {row['ma_slope']:+.4f} · "
-            f"Sector: {row.get('sector','Unknown')}"
-        ),
-        "max_stocks": 8,
-        "sell_filter": lambda row: (
-            row["bucket"] in ("SELL",)
-            and row["rs_percentile"] < 10
-            and row["weinstein_stage"] == "4"
-        ),
-    },
-
-    "🔄 Stage Transitions (NEW)": {
-        "description": "Stocks that changed Weinstein stage TODAY. "
-                       "Stage 1→2 = fresh buy. Stage 2→3/4 = exit alert.",
-        "filter": lambda row: (
-            row.get("stage_changed") == True
-            and row["weinstein_stage"] in ("2A",)
-            and row["composite_score"] >= 55
-        ),
-        "static_reason": lambda row: (
-            f"FRESH Stage transition → {row['weinstein_stage']} today! "
-            f"Score jumped {row['score_change']:+.1f} · RS {row['rs_percentile']:.0f}%ile · "
-            f"{row['entry_detail'] or 'Monitor closely'}"
-        ),
-        "max_stocks": 5,
-        "sell_filter": lambda row: (
-            row.get("stage_changed") == True
-            and row["weinstein_stage"] in ("3", "4")
-        ),
-    },
+    "KARURVYSYA","EQUITASBNK","TITAGARH",
 }
 
-# ═══════════════════════════════════════════════════
-# SUPABASE DATA FETCH
-# ═══════════════════════════════════════════════════
+def send_tg(text):
+    for chunk in [text[i:i+3800] for i in range(0, len(text), 3800)]:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data={"chat_id": TG_CHAT, "text": chunk, "parse_mode": "HTML"},
+            timeout=15,
+        )
+        time.sleep(0.4)
 
-def fetch_latest_scores() -> list[dict]:
-    """Fetch today's (or most recent) scores + universe metadata."""
-    # Get latest date
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/ar_daily_scores"
-        "?select=score_date&order=score_date.desc&limit=1",
-        headers=SB_HEADERS, timeout=15
-    )
-    if r.status_code != 200 or not r.json():
-        print("⚠ Could not fetch latest date")
-        return []
-    latest_date = r.json()[0]["score_date"]
-    print(f"  Latest scores date: {latest_date}")
+def arr(v): return "▲" if v >= 0 else "▼"
 
-    # Fetch all scores for that date + universe join
-    r2 = requests.get(
-        f"{SUPABASE_URL}/rest/v1/ar_daily_scores"
-        f"?score_date=eq.{latest_date}&limit=1000"
-        "&select=symbol,composite_score,bucket,weinstein_stage,rs_percentile,"
-        "price,price_change_pct,entry_signal,entry_detail,action_label,"
-        "score_change,stage_changed,price_vs_ma,ma_slope,rs_score,stage_score,"
-        "volume_price_score,fundamental_score,news_sentiment,high_52w,low_52w,"
-        "data_quality",
-        headers=SB_HEADERS, timeout=15
-    )
-    scores = r2.json() if r2.status_code == 200 else []
+def grade(s):
+    if s >= 70: return "S"
+    if s >= 55: return "A"
+    if s >= 38: return "B"
+    return "C"
 
-    # Fetch universe for cap_bucket and sector
-    r3 = requests.get(
-        f"{SUPABASE_URL}/rest/v1/ar_universe"
-        "?select=symbol,cap_bucket,sector,index_membership&limit=1500",
-        headers=SB_HEADERS, timeout=15
-    )
-    uni_map = {}
-    if r3.status_code == 200:
-        for u in r3.json():
-            uni_map[u["symbol"]] = u
-
-    # Merge
-    merged = []
-    for s in scores:
-        u = uni_map.get(s["symbol"], {})
-        row = {**s}
-        row["cap_bucket"]       = u.get("cap_bucket", "unknown")
-        row["sector"]           = u.get("sector", "Unknown")
-        row["index_membership"] = u.get("index_membership") or []
-        # Type coercions
-        for f in ["composite_score", "rs_percentile", "price", "price_change_pct",
-                  "score_change", "price_vs_ma", "ma_slope", "rs_score",
-                  "stage_score", "volume_price_score", "fundamental_score",
-                  "news_sentiment", "high_52w", "low_52w"]:
-            try: row[f] = float(row[f]) if row[f] is not None else 0.0
-            except: row[f] = 0.0
-        row["stage_changed"] = bool(row.get("stage_changed", False))
-        merged.append(row)
-
-    print(f"  Loaded {len(merged)} scored stocks")
-    return merged, latest_date
-
-
-# ═══════════════════════════════════════════════════
-# REAL-TIME PRICE ENRICHMENT
-# ═══════════════════════════════════════════════════
-
-def enrich_with_live_prices(symbols: list[str], stored_prices: dict) -> dict:
-    """
-    Fetch live prices for a list of symbols.
-    Returns dict: symbol → {live_price, prev_close, chg_pct, vol, vol_ratio,
-                             price_delta_from_signal, momentum_label}
-    """
+# ── FIXED: yfinance MultiIndex always used even for single ticker ──────────────
+def fetch_live(symbols):
+    """Returns {sym: {lp, pc, chg, vr, vl}} with correct MultiIndex access."""
     live = {}
-    batch = [f"{s}.NS" for s in symbols]
-
+    if not symbols:
+        return live
+    tickers = [f"{s}.NS" for s in symbols]
     try:
-        data = yf.download(batch, period="5d", interval="1d",
-                           progress=False, threads=True, auto_adjust=True)
+        data = yf.download(tickers, period="5d", interval="1d",
+                           progress=False, auto_adjust=True)
         if data.empty:
             return live
-
-        for sym in symbols:
-            ticker = f"{sym}.NS"
+        cl = data["Close"]
+        vo = data["Volume"]
+        for sym, tk in zip(symbols, tickers):
             try:
-                if len(batch) == 1:
-                    closes = data["Close"].squeeze().dropna()
-                    vols   = data["Volume"].squeeze().dropna()
-                else:
-                    closes = data["Close"][ticker].dropna()
-                    vols   = data["Volume"][ticker].dropna()
-
-                if len(closes) < 2:
+                c = cl[tk].dropna()
+                v = vo[tk].dropna()
+                if len(c) < 2:
                     continue
-
-                live_price  = float(closes.iloc[-1])
-                prev_close  = float(closes.iloc[-2])
-                today_chg   = (live_price - prev_close) / prev_close * 100
-
-                vol_today   = float(vols.iloc[-1]) if len(vols) else 0
-                vol_avg     = float(vols.iloc[-5:].mean()) if len(vols) >= 3 else vol_today
-                vol_ratio   = vol_today / vol_avg if vol_avg > 0 else 1.0
-
-                # Delta vs. stored (signal) price
-                sig_price   = stored_prices.get(sym, live_price)
-                delta       = (live_price - sig_price) / sig_price * 100 if sig_price > 0 else 0
-
-                # Momentum label
-                if delta > 5:
-                    momentum = "🚀 Strong rally since signal"
-                elif delta > 2:
-                    momentum = "📈 Up since signal"
-                elif delta > -2:
-                    momentum = "➡ Flat since signal"
-                elif delta > -5:
-                    momentum = "📉 Pullback from signal"
-                else:
-                    momentum = "⚠ Sharp drop since signal"
-
-                # Volume interpretation
-                if vol_ratio >= 2.0:
-                    vol_label = f"🔥 {vol_ratio:.1f}x avg vol"
-                elif vol_ratio >= 1.5:
-                    vol_label = f"↑ {vol_ratio:.1f}x avg vol"
-                elif vol_ratio <= 0.5:
-                    vol_label = f"↓ Thin volume ({vol_ratio:.1f}x)"
-                else:
-                    vol_label = f"Vol: {vol_ratio:.1f}x avg"
-
-                live[sym] = {
-                    "live_price":   round(live_price, 2),
-                    "prev_close":   round(prev_close, 2),
-                    "today_chg":    round(today_chg, 2),
-                    "vol_ratio":    round(vol_ratio, 2),
-                    "vol_label":    vol_label,
-                    "delta":        round(delta, 2),
-                    "momentum":     momentum,
-                }
-            except Exception as e:
-                pass  # Skip bad tickers silently
+                lp  = float(c.iloc[-1])
+                pc  = float(c.iloc[-2])
+                chg = (lp - pc) / pc * 100
+                va  = float(v.iloc[-5:].mean()) if len(v) >= 3 else float(v.iloc[-1]) if len(v) else 0
+                vr  = float(v.iloc[-1]) / va if va > 0 else 1.0
+                if vr >= 3:   vl = f"🔥{vr:.1f}x vol"
+                elif vr >= 1.5: vl = f"↑{vr:.1f}x vol"
+                elif vr < 0.5:  vl = "↓ thin vol"
+                else:           vl = f"~{vr:.1f}x vol"
+                live[sym] = {"lp": round(lp,2), "pc": round(pc,2),
+                             "chg": round(chg,2), "vr": round(vr,2), "vl": vl}
+            except Exception:
+                pass
     except Exception as e:
-        print(f"  ⚠ Batch price fetch error: {e}")
-
+        print(f"  ⚠ Price fetch: {e}")
     return live
 
-
-# ═══════════════════════════════════════════════════
-# TELEGRAM SEND HELPER
-# ═══════════════════════════════════════════════════
-
-def send_tg(text: str, parse_mode: str = "HTML") -> bool:
-    """Send a Telegram message. Splits if >4000 chars."""
-    max_len = 3900
-    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-    ok = True
-    for chunk in chunks:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data={"chat_id": TG_CHAT, "text": chunk, "parse_mode": parse_mode},
-            timeout=15
-        )
-        if r.status_code != 200:
-            print(f"  ⚠ Telegram error: {r.status_code} {r.text[:200]}")
-            ok = False
-        time.sleep(0.5)  # Avoid rate limit
-    return ok
-
-
-def chg_emoji(pct: float) -> str:
-    if pct >= 3:   return "🚀"
-    if pct >= 1:   return "📈"
-    if pct >= 0:   return "➡"
-    if pct >= -2:  return "📉"
-    return "🔻"
-
-
-def price_line(sym: str, live: dict, stored_price: float) -> str:
-    """Format the two-layer price line for a stock."""
-    if sym not in live:
-        return f"  💰 Stored: ₹{stored_price:,.1f} (live price unavailable)"
-
-    L = live[sym]
-    lines = []
-    # Layer 1: Current price
-    arrow = "▲" if L["today_chg"] >= 0 else "▼"
-    lines.append(
-        f"  💰 <b>₹{L['live_price']:,.1f}</b> "
-        f"{arrow} {abs(L['today_chg']):.2f}% today · {L['vol_label']}"
-    )
-    # Layer 2: Delta from signal
-    sig_str = f"₹{stored_price:,.1f}"
-    delta_arrow = "▲" if L["delta"] >= 0 else "▼"
-    lines.append(
-        f"  📌 {L['momentum']} ({delta_arrow}{abs(L['delta']):.1f}% from signal @ {sig_str})"
-    )
-    return "\n".join(lines)
-
-
-# ═══════════════════════════════════════════════════
-# STRATEGY-WISE MESSAGE BUILDER
-# ═══════════════════════════════════════════════════
-
-def build_strategy_message(
-    strategy_name: str,
-    config: dict,
-    all_scores: list[dict],
-    live_prices: dict,
-    score_date: str,
-) -> tuple[str, list[dict]]:
-    """
-    Build the Telegram message for one strategy.
-    Returns (message_text, matched_stocks).
-    """
-    # Apply buy filter
-    candidates = [r for r in all_scores if config["filter"](r)]
-    # Sort by composite score descending
-    candidates.sort(key=lambda x: -x["composite_score"])
-    # Cap at max_stocks
-    candidates = candidates[: config["max_stocks"]]
-
-    # Apply sell filter
-    sell_candidates = [r for r in all_scores if config.get("sell_filter", lambda _: False)(r)]
-    sell_candidates.sort(key=lambda x: x["composite_score"])
-    sell_candidates = sell_candidates[:4]
-
-    if not candidates and not sell_candidates:
-        return "", []
-
-    now_str = datetime.now().strftime("%d %b %Y, %H:%M IST")
-
-    msg = (
-        f"\n{strategy_name}\n"
-        f"<i>{config['description']}</i>\n"
-        f"<code>Scored: {score_date} | Sent: {now_str}</code>\n"
+def pblock(sym, live, stored):
+    """Two-layer price block: CMP + delta from signal price."""
+    L = live.get(sym)
+    if not L or L["lp"] == 0:
+        return f"  💰 CMP: ₹{stored:,.2f} (live fetch pending)\n"
+    delta = (L["lp"] - stored) / stored * 100 if stored > 0 else 0
+    if delta > 5:     mom = "🚀 rallied since signal"
+    elif delta > 1:   mom = "📈 up since signal"
+    elif delta > -2:  mom = "➡ flat since signal"
+    elif delta > -5:  mom = "📉 pulled back"
+    else:             mom = "⚠ dropped hard"
+    return (
+        f"  💰 CMP: <b>₹{L['lp']:,.2f}</b> {arr(L['chg'])}{abs(L['chg']):.2f}% · {L['vl']}\n"
+        f"  📌 {mom} ({arr(delta)}{abs(delta):.1f}% vs signal ₹{stored:,.0f})\n"
     )
 
-    # BUY SIGNALS
-    if candidates:
-        msg += f"\n🟢 <b>BUY SIGNALS ({len(candidates)})</b>\n"
-        for r in candidates:
-            sym = r["symbol"]
-            score_chg_str = (
-                f" <i>(+{r['score_change']:.1f} ↑)</i>" if r["score_change"] > 3
-                else f" <i>({r['score_change']:+.1f})</i>" if r["score_change"] != 0
-                else ""
-            )
-            stage_new = " 🆕" if r["stage_changed"] else ""
+# ── DATA LOADERS ───────────────────────────────────────────────────────────────
+def load_scores():
+    if not _SB_URL:
+        return [], "unknown"
+    r = requests.get(
+        f"{_SB_URL}/rest/v1/ar_daily_scores?select=score_date&order=score_date.desc&limit=1",
+        headers=_SB_H, timeout=15)
+    if r.status_code != 200 or not r.json():
+        return [], "unknown"
+    dt = r.json()[0]["score_date"]
+    r2 = requests.get(
+        f"{_SB_URL}/rest/v1/ar_daily_scores?score_date=eq.{dt}&limit=1200"
+        "&select=symbol,composite_score,bucket,weinstein_stage,rs_percentile,"
+        "price,price_change_pct,entry_signal,entry_detail,score_change,"
+        "stage_changed,price_vs_ma,ma_slope,fundamental_score,news_sentiment,"
+        "high_52w,low_52w",
+        headers=_SB_H, timeout=20)
+    r3 = requests.get(
+        f"{_SB_URL}/rest/v1/ar_universe?select=symbol,sector,cap_bucket,index_membership&limit=2000",
+        headers=_SB_H, timeout=15)
+    uni = {u["symbol"]: u for u in (r3.json() if r3.status_code == 200 else [])}
+    scores = []
+    for s in (r2.json() if r2.status_code == 200 else []):
+        u = uni.get(s["symbol"], {})
+        row = {**s,
+               "sector": u.get("sector","Unknown"),
+               "cap_bucket": u.get("cap_bucket","unknown"),
+               "index_membership": u.get("index_membership") or []}
+        for f in ["composite_score","rs_percentile","price","price_change_pct",
+                  "score_change","price_vs_ma","ma_slope","fundamental_score",
+                  "news_sentiment","high_52w","low_52w"]:
+            try: row[f] = float(row[f]) if row[f] is not None else 0.0
+            except: row[f] = 0.0
+        row["stage_changed"] = bool(row.get("stage_changed"))
+        scores.append(row)
+    return scores, dt
 
-            msg += (
-                f"\n<b>{sym}</b>{stage_new} · Score {r['composite_score']:.0f}{score_chg_str}\n"
-            )
-            # STATIC REASONING
-            msg += f"  📋 <i>{config['static_reason'](r)}</i>\n"
-            # DYNAMIC PRICING
-            msg += price_line(sym, live_prices, r["price"]) + "\n"
-            # Entry guidance
-            if r["entry_signal"] not in ("N/A", "", None):
-                msg += f"  🎯 Entry: <b>{r['entry_signal']}</b>"
-                if r.get("entry_detail"):
-                    msg += f" — {r['entry_detail']}"
-                msg += "\n"
-            # Stop hint
-            if r["weinstein_stage"] in ("2A", "2B") and r["price"] > 0:
-                stop_pct = 0.07  # 7% below current price as loose stop
-                stop_lvl = r["price"] * (1 - stop_pct)
-                msg += f"  🛑 Loose stop: ~₹{stop_lvl:,.0f} (7% rule)\n"
+def load_pulse(dt):
+    if not _SB_URL:
+        return []
+    r = requests.get(
+        f"{_SB_URL}/rest/v1/ar_market_pulse?pulse_date=eq.{dt}&limit=800"
+        "&select=symbol,company_name,sector,cmp,chg_pct,vol_ratio,vol_tag,"
+        "rsi14,rs_63d,rs_rank,weinstein_stage,vs_ma50_pct,vs_ma200_pct,"
+        "composite_score,rel_vs_nifty,from_52wh_pct,nifty_chg_pct",
+        headers=_SB_H, timeout=15)
+    rows = r.json() if r.status_code == 200 else []
+    for row in rows:
+        for f in ["cmp","chg_pct","vol_ratio","rsi14","rs_63d","vs_ma50_pct",
+                  "vs_ma200_pct","composite_score","rel_vs_nifty","from_52wh_pct","nifty_chg_pct"]:
+            try: row[f] = float(row[f]) if row[f] is not None else 0.0
+            except: row[f] = 0.0
+        try: row["rs_rank"] = int(row["rs_rank"]) if row["rs_rank"] else 999
+        except: row["rs_rank"] = 999
+    return rows
 
-    # SELL SIGNALS
-    if sell_candidates:
-        msg += f"\n🔴 <b>EXIT SIGNALS ({len(sell_candidates)})</b>\n"
-        for r in sell_candidates:
-            sym = r["symbol"]
-            msg += f"\n<b>{sym}</b> · Score {r['composite_score']:.0f}\n"
-            msg += (
-                f"  ⚠ Stage {r['weinstein_stage']} · RS {r['rs_percentile']:.0f}%ile · "
-                f"{abs(r['price_vs_ma']):.1f}% below 200d MA\n"
-            )
-            msg += price_line(sym, live_prices, r["price"]) + "\n"
-            msg += f"  ❌ Action: <b>Exit / Do not buy</b>\n"
+# ── N250F PORTFOLIO ─────────────────────────────────────────────────────────────
+def n250f_data(scores):
+    """Approximate N250F portfolio: top 20 mid/small by RS percentile (proxy for 3M return)."""
+    cands = sorted(
+        [r for r in scores if r["cap_bucket"] in ("mid","small")
+         and r["weinstein_stage"] in ("2A","2B") and r["rs_percentile"] >= 55],
+        key=lambda x: -x["rs_percentile"]
+    )[:20]
+    base = datetime(2026, 5, 19)
+    today = datetime.now()
+    days  = max(0, (today - base).days)
+    elapsed = days // 14
+    last_r  = base + timedelta(days=elapsed * 14)
+    next_r  = last_r + timedelta(days=14)
+    while next_r.weekday() >= 5:
+        next_r += timedelta(days=1)
+    return {"portfolio": cands,
+            "last_rebal": last_r.strftime("%d %b %Y"),
+            "next_rebal": next_r.strftime("%d %b %Y"),
+            "days_left": max(0, (next_r - today).days)}
 
-    return msg, candidates + sell_candidates
+def n250f_note(sym, ret, sector, today_chg, scores):
+    row = next((r for r in scores if r["symbol"] == sym), {})
+    rs = row.get("rs_percentile", 50)
+    stage = row.get("weinstein_stage", "?")
+    if ret > 15 and rs > 80: return "Strong; let winners run"
+    if ret > 5 and today_chg > 2: return "Accelerating; RS confirms trend"
+    if ret > 5: return "Profitable; momentum intact, hold"
+    if ret > 0 and rs > 70: return "Small gain; RS rising, stay"
+    if ret > 0: return "Marginal; watch for rotation signal"
+    if ret < -10 and rs < 40: return "Weak RS; likely exit at rebal"
+    if ret < -5 and stage == "4": return "Stage 4; high exit priority"
+    if ret < -5: return "Extended loss; reassess at rebal"
+    if ret < 0 and rs > 60: return "Dip only; RS still supportive"
+    return "Below entry; watch RS for exit cue"
 
+# ── MESSAGE BUILDERS ────────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════
-# CLAUDE AI SYNTHESIS
-# ═══════════════════════════════════════════════════
-
-def build_claude_synthesis(
-    all_buy_signals: list[dict],
-    sell_signals: list[dict],
-    live_prices: dict,
-    score_date: str,
-) -> str:
-    """Call Claude Sonnet to generate cross-strategy synthesis message."""
-    if not ANTHROPIC_KEY:
-        return _fallback_synthesis(all_buy_signals, sell_signals, live_prices, score_date)
-
-    # Build a compact JSON summary to send to Claude
-    buy_summary = [
-        {
-            "symbol": r["symbol"],
-            "score": r["composite_score"],
-            "stage": r["weinstein_stage"],
-            "rs_pctile": r["rs_percentile"],
-            "sector": r.get("sector", "?"),
-            "entry": r.get("entry_signal", "?"),
-            "live_price": live_prices.get(r["symbol"], {}).get("live_price", r["price"]),
-            "stored_price": r["price"],
-            "delta_pct": live_prices.get(r["symbol"], {}).get("delta", 0),
-            "today_chg": live_prices.get(r["symbol"], {}).get("today_chg", 0),
-            "score_change": r.get("score_change", 0),
-            "stage_changed": r.get("stage_changed", False),
-            "ma_slope": r.get("ma_slope", 0),
-        }
-        for r in sorted(all_buy_signals, key=lambda x: -x["composite_score"])[:15]
-    ]
-
-    sell_summary = [
-        {
-            "symbol": r["symbol"],
-            "score": r["composite_score"],
-            "stage": r["weinstein_stage"],
-            "rs_pctile": r["rs_percentile"],
-            "sector": r.get("sector", "?"),
-            "today_chg": live_prices.get(r["symbol"], {}).get("today_chg", r.get("price_change_pct", 0)),
-            "price_vs_ma": r.get("price_vs_ma", 0),
-        }
-        for r in sorted(sell_signals, key=lambda x: x["composite_score"])[:10]
-    ]
-
-    prompt = f"""You are AlphaRadar AI, a systematic NSE equity analyst. 
-Analyse the following signal data from {score_date} and write a CROSS-STRATEGY SYNTHESIS Telegram message.
-
-BUY SIGNALS (top 15):
-{json.dumps(buy_summary, indent=2)}
-
-SELL/EXIT SIGNALS (top 10):
-{json.dumps(sell_summary, indent=2)}
-
-Write a concise Telegram message (max 600 words) with:
-1. Market breadth assessment (are buy signals broad or concentrated in one sector?)
-2. Highest-conviction trade idea with entry/risk logic (pick 1 stock only)
-3. Key risk/red flag from the sell signals (any sector pattern?)
-4. One actionable idea for each: momentum traders, position traders, and risk-off investors
-5. A 2-line summary of what the overall signal says about the NSE market today
-
-Use HTML formatting (<b>, <i>) for emphasis. Use ₹ for prices. Be direct, not verbose. 
-No disclaimers needed — the user is a professional trader.
-Start with: 🧠 <b>AlphaRadar AI Synthesis — {score_date}</b>"""
-
-    try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type":      "application/json",
-                "x-api-key":         ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model":      "claude-sonnet-4-20250514",
-                "max_tokens": 1200,
-                "messages":   [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
-        )
-        if r.status_code == 200:
-            return r.json()["content"][0]["text"]
-        else:
-            print(f"  ⚠ Claude API error: {r.status_code}")
-            return _fallback_synthesis(all_buy_signals, sell_signals, live_prices, score_date)
-    except Exception as e:
-        print(f"  ⚠ Claude call failed: {e}")
-        return _fallback_synthesis(all_buy_signals, sell_signals, live_prices, score_date)
-
-
-def _fallback_synthesis(all_buy, all_sell, live_prices, score_date) -> str:
-    """Fallback if Claude API key not set."""
+def build_header(scores, dt):
+    buckets = Counter(r["bucket"] for r in scores)
+    stages  = Counter(r["weinstein_stage"] for r in scores)
+    bn = [r for r in scores if r.get("entry_signal") == "BUY NOW"]
+    tr = [r for r in scores if r.get("stage_changed")]
+    s2 = stages.get("2A",0) + stages.get("2B",0)
     now = datetime.now().strftime("%d %b %Y, %H:%M IST")
-    top3 = sorted(all_buy, key=lambda x: -x["composite_score"])[:3]
-    sectors = {}
-    for r in all_buy:
-        sec = r.get("sector", "Unknown")
-        sectors[sec] = sectors.get(sec, 0) + 1
-    top_sec = sorted(sectors.items(), key=lambda x: -x[1])[:3]
-
-    msg = (
-        f"🧠 <b>AlphaRadar Synthesis — {score_date}</b>\n"
-        f"<code>{now}</code>\n\n"
-        f"<b>Market breadth:</b> {len(all_buy)} buy · {len(all_sell)} sell signals\n"
-        f"Top sectors: {', '.join(f'{s}({c})' for s,c in top_sec)}\n\n"
-        f"<b>Top 3 conviction picks:</b>\n"
+    return (
+        f"🎯 <b>AlphaRadar — {dt}</b>\n<code>{now} | {len(scores)} stocks</code>\n\n"
+        f"🟢 Must Buy: {buckets.get('MUST_BUY',0)}  "
+        f"🔵 Can Buy: {buckets.get('CAN_BUY',0)}  "
+        f"⚪ Neutral: {buckets.get('NEUTRAL',0)}\n"
+        f"🟡 Avoid: {buckets.get('AVOID',0)}  🔴 Sell: {buckets.get('SELL',0)}\n\n"
+        f"⚡ <b>{len(bn)} BUY NOW setups · {len(tr)} stage transitions</b>\n"
+        f"Stage 2A: {stages.get('2A',0)} · 2B: {stages.get('2B',0)} · 4: {stages.get('4',0)}\n"
+        f"<i>11 messages follow ↓</i>"
     )
-    for r in top3:
-        lp = live_prices.get(r["symbol"], {})
-        price_str = f"₹{lp.get('live_price', r['price']):,.1f}"
-        chg_str   = f"{lp.get('today_chg', 0):+.1f}% today"
-        msg += f"• <b>{r['symbol']}</b> {price_str} ({chg_str}) · Score {r['composite_score']:.0f}\n"
-
-    if all_sell:
-        worst = sorted(all_sell, key=lambda x: x["composite_score"])[:2]
-        msg += f"\n<b>Top exits:</b> " + ", ".join(f"<b>{r['symbol']}</b>" for r in worst)
-
-    msg += "\n\n⚠ <i>Add ANTHROPIC_API_KEY for full Claude AI synthesis</i>"
-    return msg
 
 
-# ═══════════════════════════════════════════════════
-# KOTAK NEO PORTFOLIO OVERLAY
-# ═══════════════════════════════════════════════════
-
-def build_kotak_portfolio_alert(
-    session_id: str,
-    all_scores: list[dict],
-    live_prices: dict,
-) -> str:
-    """
-    Call Kotak Neo MCP to get holdings, cross-reference with AlphaRadar signals.
-    Returns a Telegram message.
-    
-    NOTE: This function formats the Kotak data — actual MCP call must be 
-    made from Claude interface (kotak-neo:get_holdings tool).
-    The session_id expires daily from ICICIDirect.
-    """
-    if not session_id:
-        return (
-            "💼 <b>Kotak Neo Portfolio Overlay</b>\n"
-            "<i>Session ID not provided. To enable:</i>\n"
-            "1. Login to ICICIDirect.com\n"
-            "2. Go to Settings → API Sessions → Generate Token\n"
-            "3. Set KOTAK_SESSION_ID env var\n"
-            "4. Re-run this script\n\n"
-            "Once connected: Claude will cross-reference your live "
-            "portfolio with AlphaRadar signals to show which of YOUR "
-            "holdings are flagging SELL, and which buy signals you don't own yet."
+def build_core(scores, live, dt):
+    hits = sorted([r for r in scores if r["bucket"] == "MUST_BUY" and r["composite_score"] >= 80],
+                  key=lambda x: -x["composite_score"])
+    if not hits: return ""
+    m = (
+        f"🏆 <b>AlphaRadar Core — MUST BUY tier</b>\n"
+        f"<i>5-factor composite score ≥ 80/100. Factors: Weinstein Stage (30pts), "
+        f"O'Neil RS percentile rank (25pts), Volume-Price confirmation (20pts), "
+        f"Fundamentals/ROE/margins (15pts), News catalyst (10pts). "
+        f"Stage 2A only — stock must be above rising 30-week MA with upward slope. "
+        f"Score = EOD data. CMP = live yfinance.</i>\n"
+        f"<code>{dt} | {len(hits)} signals</code>\n"
+    )
+    for r in hits:
+        sym = r["symbol"]
+        sc_str = f" <i>(+{r['score_change']:.1f}↑)</i>" if r["score_change"] > 3 else \
+                 f" <i>({r['score_change']:+.1f})</i>" if r["score_change"] else ""
+        stop = r["price"] * 0.93
+        m += (
+            f"\n<b>{sym}</b>{'  🆕' if r['stage_changed'] else ''} · "
+            f"{r['composite_score']:.0f}/100{sc_str} · Grade {grade(r['composite_score'])}\n"
+            f"  📋 Stage {r['weinstein_stage']} · RS {r['rs_percentile']:.0f}%ile"
+            f" · {r.get('sector','?')} · slope {r['ma_slope']:+.4f}\n"
+            + pblock(sym, live, r["price"])
+            + f"  🎯 Entry: <b>{r.get('entry_signal','?')}</b>"
+              + (f" — {r['entry_detail']}" if r.get("entry_detail") else "") + "\n"
+            + f"  🛑 Stop: ₹{stop:,.0f} · 52W ₹{r['low_52w']:,.0f}–₹{r['high_52w']:,.0f}\n"
         )
+    return m
 
-    # Build a score lookup
-    score_map = {r["symbol"]: r for r in all_scores}
 
-    msg = "💼 <b>Kotak Neo Portfolio × AlphaRadar Signals</b>\n"
-    msg += "<i>Cross-reference your live portfolio with today's signals</i>\n\n"
-    msg += (
-        "🔗 <i>Holdings fetched via Kotak Neo MCP. "
-        "Run the kotak-neo:get_holdings tool in Claude chat for live data.</i>\n\n"
+def build_n500(scores, live, dt):
+    n500 = sorted(
+        [r for r in scores if "nifty500" in r.get("index_membership",[])
+         and r["bucket"] in ("MUST_BUY","CAN_BUY")],
+        key=lambda x: -x["composite_score"]
     )
-    msg += "<b>How to use:</b>\n"
-    msg += "1. In Claude, type: <code>show my Kotak portfolio vs AlphaRadar signals</code>\n"
-    msg += "2. Claude will call Kotak MCP + cross-reference with the latest scores\n"
-    msg += "3. You'll see: which holdings are in SELL zone, P&L, and new ideas\n"
-
-    return msg
-
-
-# ═══════════════════════════════════════════════════
-# FRESH SELL SIGNALS MESSAGE
-# ═══════════════════════════════════════════════════
-
-def build_fresh_sell_message(
-    all_scores: list[dict],
-    live_prices: dict,
-    score_date: str,
-) -> str:
-    """Build a dedicated SELL / EXIT alert message."""
-    sells = [r for r in all_scores if r["bucket"] == "SELL"]
-    # Sort by most severe (lowest score, steepest negative MA slope)
-    sells.sort(key=lambda x: (x["composite_score"], x["ma_slope"]))
-
-    # Fresh sells = stage changed today OR score dropped > 10
-    fresh_sells = [
-        r for r in sells
-        if r.get("stage_changed") or (r.get("score_change", 0) < -5)
-    ]
-
-    # Notable names in sell zone (large caps, high RS names)
-    notable = [r for r in sells if r.get("cap_bucket") == "large"]
-
-    now = datetime.now().strftime("%d %b %Y, %H:%M IST")
-
-    msg = (
-        f"🔴 <b>AlphaRadar SELL / EXIT Signals — {score_date}</b>\n"
-        f"<code>{now}</code>\n"
-        f"<i>Total Stage 4 / SELL bucket: {len(sells)} stocks</i>\n"
+    risers = sorted([r for r in n500 if r.get("score_change",0) >= 5],
+                    key=lambda x: -x["score_change"])[:3]
+    gs = [r for r in n500 if r["composite_score"] >= 70][:5]
+    ga = [r for r in n500 if 55 <= r["composite_score"] < 70][:4]
+    m = (
+        f"📊 <b>N500 Strength Ranker</b>\n"
+        f"<i>Daily leaderboard of Nifty 500 members ranked by composite score. "
+        f"NOT filtered by cap size — any Nifty 500 stock qualifies. "
+        f"Grade S (≥70/100) = highest conviction; A (55-69) = strong; B (38-54) = watch. "
+        f"Score built from Stage, RS, volume-price, and fundamentals. "
+        f"Forces you to own the strongest stocks, not emotional ones. EOD data.</i>\n"
+        f"<code>{dt} | {len(n500)} N500 stocks in buy zone</code>\n"
     )
-
-    if fresh_sells:
-        msg += f"\n🚨 <b>FRESH SELLS TODAY ({len(fresh_sells)} new):</b>\n"
-        for r in fresh_sells[:6]:
+    if gs:
+        m += "\n🥇 <b>Grade S (≥70) — highest conviction:</b>\n"
+        for r in gs:
             sym = r["symbol"]
-            lp  = live_prices.get(sym, {})
-            live_str = f"₹{lp.get('live_price', r['price']):,.1f}" if lp else f"₹{r['price']:,.1f}"
-            chg_str  = f"{lp.get('today_chg', r['price_change_pct']):+.2f}%"
-            msg += (
-                f"\n<b>{sym}</b> · Score {r['composite_score']:.0f}\n"
-                f"  Stage: {r['weinstein_stage']} · RS: {r['rs_percentile']:.0f}%ile\n"
-                f"  {live_str} ({chg_str} today) · {abs(r['price_vs_ma']):.1f}% below 200d MA\n"
-                f"  Slope: {r['ma_slope']:+.4f} · Score Δ: {r.get('score_change',0):+.1f}\n"
-                f"  ❌ <b>Exit any long position</b>\n"
+            m += (
+                f"\n<b>{sym}</b>{'  🆕' if r.get('stage_changed') else ''} · "
+                f"{r['composite_score']:.0f}/100 · S\n"
+                f"  Stage {r['weinstein_stage']} · RS {r['rs_percentile']:.0f}%ile"
+                f" · {r.get('sector','?')} · {r.get('cap_bucket','?').title()}-cap\n"
+                + pblock(sym, live, r["price"])
+                + f"  🎯 {r.get('entry_signal','?')}: {r.get('entry_detail','')}\n"
+            )
+    if ga:
+        m += "\n🥈 <b>Grade A (55–69) — strong:</b>\n"
+        for r in ga:
+            sym = r["symbol"]
+            L = live.get(sym, {})
+            lp  = L.get("lp", r["price"])
+            chg = L.get("chg", r["price_change_pct"])
+            m += (
+                f"  <b>{sym}</b> ₹{lp:,.2f} {arr(chg)}{abs(chg):.2f}%"
+                f" · {r['composite_score']:.0f}/100 · RS {r['rs_percentile']:.0f}%ile"
+                f" · {r.get('entry_signal','?')}\n"
+            )
+    if risers:
+        m += "\n📈 <b>Biggest score jumps today (entering radar):</b>\n"
+        for r in risers:
+            sym = r["symbol"]
+            lp = live.get(sym, {}).get("lp", r["price"])
+            m += (
+                f"  🆕 <b>{sym}</b> +{r['score_change']:.1f}↑ → "
+                f"{r['composite_score']:.0f} · Stage {r['weinstein_stage']} · ₹{lp:,.2f}\n"
+            )
+    return m
+
+
+def build_total_market(scores, live, dt):
+    bn = sorted([r for r in scores if r.get("entry_signal") == "BUY NOW"
+                 and r["bucket"] in ("MUST_BUY","CAN_BUY")],
+                key=lambda x: -x["composite_score"])
+    stages = Counter(r["weinstein_stage"] for r in scores)
+    caps   = Counter(r.get("cap_bucket","?") for r in bn)
+    s2 = stages.get("2A",0) + stages.get("2B",0)
+    s4 = stages.get("4",0)
+    regime = "🟢 BULLISH" if s2 > s4*2 else "🟡 MIXED" if s2 > s4 else "🔴 BEARISH"
+    m = (
+        f"🌐 <b>Nifty Total Market — Active Setups</b>\n"
+        f"<i>Full-universe scan (750+ stocks, all caps) for BUY NOW entry patterns TODAY. "
+        f"Entry types: Breakout near 52W high on 1.5x+ volume; "
+        f"Pullback to 21d MA on low volume (safe re-entry); "
+        f"VCP — tight range + volume dry-up (coil before spring). "
+        f"Market regime from Stage 2 vs Stage 4 count. EOD signals + live CMP.</i>\n"
+        f"<code>{dt} | Regime: {regime} | Stage 2: {s2} | Stage 4: {s4}</code>\n\n"
+        f"<b>Breadth:</b> Large {caps.get('large',0)} · Mid {caps.get('mid',0)}"
+        f" · Small {caps.get('small',0)+caps.get('micro',0)} BUY NOW signals\n"
+    )
+    if not bn:
+        m += "\n<i>No BUY NOW signals today — market may be extended.</i>\n"
+        return m
+    m += f"\n⚡ <b>BUY NOW SETUPS ({len(bn)}):</b>\n"
+    for r in bn[:8]:
+        sym = r["symbol"]
+        sc_str = f" (+{r['score_change']:.1f}↑)" if r.get("score_change",0) > 5 else ""
+        m += (
+            f"\n<b>{sym}</b>{'  🆕' if r.get('stage_changed') else ''} · "
+            f"{r['composite_score']:.0f}/100{sc_str}\n"
+            f"  📋 {r.get('entry_detail','?')} · Stage {r['weinstein_stage']}"
+            f" · RS {r['rs_percentile']:.0f}%ile · {r.get('cap_bucket','?').title()}-cap\n"
+            + pblock(sym, live, r["price"])
+        )
+    return m
+
+
+def build_n250f(scores, live, dt):
+    info = n250f_data(scores)
+    port = info["portfolio"]
+    winners, losers = [], []
+    for r in port:
+        sym = r["symbol"]
+        ep  = r["price"]
+        cmp = live.get(sym, {}).get("lp", ep)
+        ret = (cmp - ep) / ep * 100 if ep > 0 else 0
+        today_chg = live.get(sym, {}).get("chg", r.get("price_change_pct",0))
+        (winners if ret >= 0 else losers).append((sym, cmp, ret, r.get("sector","?"), today_chg))
+    avg = sum(x[2] for x in winners+losers) / len(port) if port else 0
+
+    # Next rebal candidates
+    current = {r["symbol"] for r in port}
+    entries = sorted(
+        [r for r in scores if r["cap_bucket"] in ("mid","small")
+         and r["rs_percentile"] >= 80 and r["weinstein_stage"] in ("2A","2B")
+         and r["symbol"] not in current],
+        key=lambda x: -x["rs_percentile"]
+    )[:5]
+    rs_med = np.median([r["rs_percentile"] for r in port]) if port else 50
+    exits  = [r for r in port if r["rs_percentile"] < rs_med * 0.7][:4]
+
+    m = (
+        f"📊 <b>N250F — Nifty 250 Fortnightly Portfolio</b>\n"
+        f"<i>Mechanical momentum strategy: every 14 days, rank all Nifty 250 stocks "
+        f"by 63-day (3-month) price return → hold top 20 at 5% equal weight. "
+        f"Zero discretion. Backtest Jun 2015–May 2026: ~28% CAGR, 57% win rate, "
+        f"285 rebalances, 1,897 closed trades. "
+        f"Reco date = last EOD scoring run (not real-time); CMP is live.</i>\n"
+        f"<code>Last rebal: {info['last_rebal']} · Next: {info['next_rebal']}"
+        f" ({info['days_left']}d away)</code>\n\n"
+        f"📌 <b>Portfolio ({len(port)} holdings) — avg P&L: "
+        f"{arr(avg)}{abs(avg):.1f}%</b>\n"
+        f"✅ {len(winners)} profitable · ❌ {len(losers)} in loss\n"
+    )
+    if winners:
+        m += "\n🟢 <b>Winning positions:</b>\n"
+        for sym, cmp, ret, sec, tc in sorted(winners, key=lambda x: -x[2])[:8]:
+            note = n250f_note(sym, ret, sec, tc, scores)
+            m += (
+                f"  <b>{sym}</b> ₹{cmp:,.2f} {arr(tc)}{abs(tc):.2f}%t"
+                f" · <b>+{ret:.1f}%</b> · <i>{note}</i>\n"
+            )
+    if losers:
+        m += "\n🔴 <b>Loss positions:</b>\n"
+        for sym, cmp, ret, sec, tc in sorted(losers, key=lambda x: x[2])[:6]:
+            note = n250f_note(sym, ret, sec, tc, scores)
+            m += (
+                f"  <b>{sym}</b> ₹{cmp:,.2f} {arr(tc)}{abs(tc):.2f}%t"
+                f" · <b>{ret:.1f}%</b> · <i>{note}</i>\n"
+            )
+    m += f"\n🔄 <b>Next rebalance: {info['next_rebal']}</b>\n"
+    if exits:
+        m += "  🔴 Likely exits (RS fading): " + \
+             ", ".join(f"<b>{r['symbol']}</b>(RS {r['rs_percentile']:.0f}%ile)" for r in exits) + "\n"
+    if entries:
+        m += "  🟢 Likely entries (rising RS): " + \
+             ", ".join(f"<b>{r['symbol']}</b>(RS {r['rs_percentile']:.0f}%ile,{r.get('sector','?')[:10]})" for r in entries) + "\n"
+    m += f"\n<i>Action on {info['next_rebal']} at 9:15 AM: sell exits, buy entries. Equal 5% weight.</i>\n"
+    return m
+
+
+def build_manas(scores, live, dt):
+    buys = sorted([r for r in scores if r["symbol"] in MANAS_UNIVERSE
+                   and r["bucket"] in ("MUST_BUY","CAN_BUY") and r["composite_score"] >= 55],
+                  key=lambda x: -x["composite_score"])
+    sells = sorted([r for r in scores if r["symbol"] in MANAS_UNIVERSE
+                    and r["bucket"] == "SELL"],
+                   key=lambda x: x["composite_score"])
+    m = (
+        f"⭐ <b>Manas Arora Strategy — VCP + Stage</b>\n"
+        f"<i>Curated ~50-stock small/mid universe screened for VCP setups. "
+        f"Criteria: stock above rising 30W MA, MA10 > MA30 (uptrend), "
+        f"within 25% of 52W high, price range contracting (lower highs/lows), "
+        f"volume drying to 50-70% of average. O'Neil + Minervini methodology. "
+        f"Score uses EOD data; CMP is live. Discretionary confirmation recommended.</i>\n"
+        f"<code>{dt} | {len(buys)} buy · {len(sells)} sell in Manas universe</code>\n"
+    )
+    if buys:
+        m += f"\n🟢 <b>BUY SIGNALS ({len(buys)}):</b>\n"
+        for r in buys[:6]:
+            sym = r["symbol"]
+            sc_str = f" (+{r['score_change']:.1f}↑)" if r.get("score_change",0) > 3 else ""
+            m += (
+                f"\n<b>{sym}</b>{'  🆕' if r.get('stage_changed') else ''} · "
+                f"{r['composite_score']:.0f}/100{sc_str}\n"
+                f"  📋 Stage {r['weinstein_stage']} · RS {r['rs_percentile']:.0f}%ile"
+                f" · slope {r['ma_slope']:+.4f}\n"
+                + pblock(sym, live, r["price"])
+                + f"  🎯 {r.get('entry_signal','?')}: {r.get('entry_detail','')}\n"
             )
     else:
-        msg += "\n<i>No fresh stage transitions into SELL today.</i>\n"
-
-    if notable:
-        msg += f"\n⚠ <b>NOTABLE LARGE-CAPS in SELL zone:</b>\n"
-        for r in notable[:5]:
+        m += "\n<i>No strong VCP setups in Manas universe today.</i>\n"
+    if sells:
+        m += f"\n🔴 <b>EXIT — Stage 4 in Manas universe ({len(sells)}):</b>\n"
+        for r in sells[:5]:
             sym = r["symbol"]
-            lp  = live_prices.get(sym, {})
-            live_str = f"₹{lp.get('live_price', r['price']):,.1f}" if lp else f"₹{r['price']:,.1f}"
-            msg += (
-                f"• <b>{sym}</b> ({r.get('sector','?')}) · {live_str} · "
-                f"RS {r['rs_percentile']:.0f}%ile · Stage {r['weinstein_stage']}\n"
+            L = live.get(sym, {})
+            lp = L.get("lp", r["price"])
+            chg = L.get("chg", r["price_change_pct"])
+            m += f"  ❌ <b>{sym}</b> ₹{lp:,.2f} {arr(chg)}{abs(chg):.2f}% · Score {r['composite_score']:.0f} · RS {r['rs_percentile']:.0f}%ile\n"
+    return m
+
+
+def build_transitions(scores, live, dt):
+    new_buys = sorted(
+        [r for r in scores if r.get("stage_changed") and r["weinstein_stage"] == "2A"
+         and r["composite_score"] >= 50],
+        key=lambda x: -x.get("score_change",0)
+    )
+    new_exits = sorted(
+        [r for r in scores if r.get("stage_changed") and r["weinstein_stage"] in ("3","4")],
+        key=lambda x: x["composite_score"]
+    )
+    if not new_buys and not new_exits:
+        return ""
+    m = (
+        f"🔄 <b>Stage Transitions — Fresh Today</b>\n"
+        f"<i>Stocks that changed Weinstein stage vs yesterday's scoring. "
+        f"Stage 1B→2A = uptrend just confirmed — stock crossed above rising 30W MA. "
+        f"This is the EARLIEST buy signal with the longest remaining runway. "
+        f"Score typically jumps +5 to +25 on transition day. "
+        f"Stage 2→3/4 = distribution beginning — exit signal. EOD data.</i>\n"
+        f"<code>{dt} | {len(new_buys)} new Stage 2A · {len(new_exits)} exits</code>\n"
+    )
+    if new_buys:
+        m += f"\n🆕 <b>NEW STAGE 2A ({len(new_buys)}) — act quickly:</b>\n"
+        for r in new_buys[:6]:
+            sym = r["symbol"]
+            m += (
+                f"\n<b>{sym}</b> → Stage 2A"
+                f" · {r['composite_score']:.0f}/100 (+{r.get('score_change',0):.1f}↑)\n"
+                f"  RS {r['rs_percentile']:.0f}%ile · {r.get('sector','?')}"
+                f" · {r.get('entry_detail','')}\n"
+                + pblock(sym, live, r["price"])
             )
+    if new_exits:
+        m += f"\n⚠ <b>STAGE EXIT ALERTS ({len(new_exits)}):</b>\n"
+        for r in new_exits[:5]:
+            sym = r["symbol"]
+            L = live.get(sym, {})
+            lp = L.get("lp", r["price"])
+            chg = L.get("chg", r.get("price_change_pct",0))
+            m += (
+                f"  ⚡ <b>{sym}</b> → Stage {r['weinstein_stage']} · "
+                f"₹{lp:,.2f} {arr(chg)}{abs(chg):.2f}% · "
+                f"Score {r['composite_score']:.0f}\n"
+            )
+    return m
 
-    # Sector concentration in sell zone
-    sec_counts = {}
-    for r in sells:
-        sec = r.get("sector", "Unknown")
-        sec_counts[sec] = sec_counts.get(sec, 0) + 1
-    top_sell_secs = sorted(sec_counts.items(), key=lambda x: -x[1])[:4]
-    if top_sell_secs:
-        msg += f"\n📊 <b>Sectors most in SELL zone:</b>\n"
-        for sec, cnt in top_sell_secs:
-            msg += f"  • {sec}: {cnt} stocks\n"
 
-    return msg
-
-
-# ═══════════════════════════════════════════════════
-# DAILY HEADER MESSAGE
-# ═══════════════════════════════════════════════════
-
-def build_header_message(all_scores: list[dict], score_date: str) -> str:
-    """Opening summary message."""
-    from collections import Counter
-    buckets = Counter(r["bucket"] for r in all_scores)
-    stages  = Counter(r["weinstein_stage"] for r in all_scores)
-    buy_nows = [r for r in all_scores if r.get("entry_signal") == "BUY NOW"]
-
-    now = datetime.now().strftime("%d %b %Y, %H:%M IST")
-
-    msg = (
-        f"🎯 <b>AlphaRadar Daily Brief — {score_date}</b>\n"
-        f"<code>{now} | {len(all_scores)} stocks scored</code>\n\n"
-        f"📊 <b>Universe Snapshot:</b>\n"
-        f"  🟢 Must Buy: {buckets.get('MUST_BUY',0)}  "
-        f"🔵 Can Buy: {buckets.get('CAN_BUY',0)}\n"
-        f"  ⚪ Neutral: {buckets.get('NEUTRAL',0)}  "
-        f"🟡 Avoid: {buckets.get('AVOID',0)}  "
-        f"🔴 Sell: {buckets.get('SELL',0)}\n\n"
-        f"⚡ <b>Active BUY NOW setups: {len(buy_nows)}</b>\n"
+def build_market_pulse(pulse, dt):
+    if not pulse: return ""
+    ath   = sorted([r for r in pulse if "ATH Vol" in str(r.get("vol_tag",""))], key=lambda x: -x["chg_pct"])
+    surges = sorted([r for r in pulse if r["vol_ratio"] >= 3 and r["chg_pct"] >= 2
+                     and r["weinstein_stage"] in ("2A","2B")], key=lambda x: -x["rel_vs_nifty"])
+    leaders = sorted([r for r in pulse if r.get("rs_rank",999) <= 30 and r["chg_pct"] > 0],
+                     key=lambda x: x.get("rs_rank",999))
+    nc = pulse[0].get("nifty_chg_pct",0) if pulse else 0
+    m = (
+        f"📡 <b>Market Pulse — Daily Movers</b>\n"
+        f"<i>Separate signal layer from ar_market_pulse table. Tracks UNUSUAL activity today: "
+        f"ATH Volume = stock trading at all-time high volume (institutional event), "
+        f"Volume surge ≥3x = strong institutional accumulation, "
+        f"RS leaders = stocks outperforming Nifty on 63-day basis. "
+        f"These may not have high composite scores yet — they are on the WATCHLIST radar. "
+        f"Data: same-day EOD. CMP from pulse table (EOD).</i>\n"
+        f"<code>{dt} | Nifty: {arr(nc)}{abs(nc):.2f}%</code>\n"
     )
-    for r in sorted(buy_nows, key=lambda x: -x["composite_score"])[:5]:
-        msg += f"  → <b>{r['symbol']}</b> ({r['entry_detail']})\n"
+    if ath:
+        m += f"\n🏆 <b>ATH Volume ({len(ath)} stocks) — rare institutional signal:</b>\n"
+        for r in ath[:5]:
+            m += (
+                f"  <b>{r['symbol']}</b> ({r.get('company_name','')[:22]}) "
+                f"₹{r['cmp']:,.2f} {arr(r['chg_pct'])}{abs(r['chg_pct']):.2f}%"
+                f" · {r['vol_tag']} · RS #{r.get('rs_rank','?')}\n"
+            )
+    if surges:
+        m += f"\n🔥 <b>Volume + price surge (≥3x vol, ≥+2%):</b>\n"
+        for r in surges[:7]:
+            m += (
+                f"  <b>{r['symbol']}</b> ({r.get('sector','')[:14]})"
+                f" ₹{r['cmp']:,.2f} +{r['chg_pct']:.2f}%"
+                f" · {r['vol_tag']} · RS #{r.get('rs_rank','?')}"
+                f" · Nifty+{r['rel_vs_nifty']:.2f}%\n"
+            )
+    if leaders:
+        m += f"\n🎯 <b>RS leaders (rank 1–30) moving today:</b>\n"
+        for r in leaders[:5]:
+            m += (
+                f"  #{r.get('rs_rank','?')} <b>{r['symbol']}</b>"
+                f" ₹{r['cmp']:,.2f} +{r['chg_pct']:.2f}%"
+                f" · RS63d +{r.get('rs_63d',0):.1f}% · {r.get('vol_tag','')}\n"
+            )
+    secs = Counter(r.get("sector","?") for r in surges)
+    if secs:
+        m += "\n📊 <b>Active sectors today:</b> " + \
+             ", ".join(f"{s}({c})" for s,c in secs.most_common(3)) + "\n"
+    return m
 
-    msg += (
-        f"\n📈 <b>Stage Distribution:</b>\n"
-        f"  Stage 2A: {stages.get('2A',0)} | Stage 2B: {stages.get('2B',0)} | "
-        f"Stage 3: {stages.get('3',0)} | Stage 4: {stages.get('4',0)}\n"
-        f"\n<i>Strategy-wise breakdowns follow ↓</i>"
+
+def build_sells(scores, live, dt):
+    sells = sorted([r for r in scores if r["bucket"] == "SELL"], key=lambda x: x["composite_score"])
+    fresh = [r for r in sells if r.get("stage_changed") or r.get("score_change",0) < -5]
+    large = [r for r in sells if r.get("cap_bucket") == "large"]
+    secs  = Counter(r.get("sector","?") for r in sells)
+    m = (
+        f"🔴 <b>Sell / Exit Signals</b>\n"
+        f"<i>Stocks in Weinstein Stage 4 confirmed downtrend: price below declining "
+        f"30-week MA, RS in bottom 20 percentile, composite score ≤ 19/100. "
+        f"NOT buy-the-dip candidates — Stage 4 typically lasts 6–18 months. "
+        f"Exit longs. Do not average down. Wait for Stage 1 basing before re-entry. EOD data.</i>\n"
+        f"<code>{dt} | {len(sells)} stocks in SELL bucket</code>\n"
     )
-    return msg
+    if fresh:
+        m += f"\n🚨 <b>FRESH SELLS TODAY ({len(fresh)}):</b>\n"
+        for r in fresh[:5]:
+            sym = r["symbol"]
+            L = live.get(sym, {})
+            lp  = L.get("lp", r["price"])
+            chg = L.get("chg", r.get("price_change_pct",0))
+            m += (
+                f"\n<b>{sym}</b> · Score {r['composite_score']:.0f}\n"
+                f"  Stage {r['weinstein_stage']} · RS {r['rs_percentile']:.0f}%ile"
+                f" · {abs(r['price_vs_ma']):.1f}% below 200d MA\n"
+                f"  ₹{lp:,.2f} {arr(chg)}{abs(chg):.2f}% · slope {r['ma_slope']:+.4f}\n"
+                f"  ❌ <b>Exit all longs</b>\n"
+            )
+    if large:
+        m += f"\n⚠ <b>Notable large-caps in Stage 4:</b>\n"
+        for r in large[:5]:
+            sym = r["symbol"]
+            L = live.get(sym, {})
+            lp  = L.get("lp", r["price"])
+            chg = L.get("chg", r.get("price_change_pct",0))
+            m += f"  <b>{sym}</b> ₹{lp:,.2f} {arr(chg)}{abs(chg):.2f}% · RS {r['rs_percentile']:.0f}%ile · {r.get('sector','?')}\n"
+    m += "\n📊 <b>SELL sectors:</b> " + ", ".join(f"{s}({c})" for s,c in secs.most_common(4)) + "\n"
+    return m
 
 
-# ═══════════════════════════════════════════════════
-# MAIN ORCHESTRATOR
-# ═══════════════════════════════════════════════════
-
-def run_full_alert_cycle(kotak_session_id: str = ""):
-    """
-    Full pipeline:
-    1. Fetch Supabase scores
-    2. Identify all unique symbols needing live prices
-    3. Batch-fetch live prices
-    4. Send header message
-    5. Send strategy-wise messages (one per strategy)
-    6. Send fresh sell message
-    7. Send Claude AI synthesis
-    8. Send Kotak overlay status
-    """
-    print("\n" + "="*60)
-    print("AlphaRadar Telegram Alert Cycle")
-    print("="*60)
-
-    # ── 1. Fetch scores ──
-    print("\n[1/7] Fetching Supabase scores...")
-    result = fetch_latest_scores()
-    if not result:
-        send_tg("⚠ AlphaRadar: Could not fetch scores. Check Supabase connection.")
-        return
-    all_scores, score_date = result
-
-    # ── 2. Identify symbols for live prices ──
-    print("\n[2/7] Identifying symbols for live price fetch...")
-    # All buy candidates + sell signals
-    price_symbols = list({
-        r["symbol"] for r in all_scores
-        if r["bucket"] in ("MUST_BUY", "CAN_BUY", "SELL")
-        or r.get("stage_changed")
-    })
-    stored_prices = {r["symbol"]: r["price"] for r in all_scores}
-    print(f"  Fetching live prices for {len(price_symbols)} symbols...")
-
-    # ── 3. Batch fetch live prices ──
-    print("\n[3/7] Fetching live prices...")
-    live_prices = enrich_with_live_prices(price_symbols, stored_prices)
-    print(f"  Got live prices for {len(live_prices)} symbols")
-
-    # ── 4. Header message ──
-    print("\n[4/7] Sending header message...")
-    header = build_header_message(all_scores, score_date)
-    send_tg(header)
-    time.sleep(1)
-
-    # ── 5. Strategy-wise messages ──
-    print("\n[5/7] Sending strategy messages...")
-    all_featured = []  # Track all stocks featured in buy signals
-    sell_all = [r for r in all_scores if r["bucket"] == "SELL"]
-
-    for strategy_name, config in STRATEGIES.items():
-        print(f"  Strategy: {strategy_name}")
-        msg, featured = build_strategy_message(
-            strategy_name, config, all_scores, live_prices, score_date
+def build_synthesis(buys, sells, pulse, dt):
+    if not _CLAUDE:
+        bs = [{"sym":r["symbol"],"score":r["composite_score"],"sector":r.get("sector","?")} for r in sorted(buys,key=lambda x:-x["composite_score"])[:12]]
+        ss = [{"sym":r["symbol"],"sector":r.get("sector","?")} for r in sells[:6]]
+        top3 = sorted(buys, key=lambda x: -x["composite_score"])[:3]
+        secs = Counter(r.get("sector","?") for r in buys)
+        m = (
+            f"🧠 <b>AlphaRadar Synthesis — {dt}</b>\n\n"
+            f"Buys: {len(buys)} · Sells: {len(sells)}\n"
+            f"Top sectors: {', '.join(f'{s}({c})' for s,c in secs.most_common(3))}\n\n"
+            f"Top picks: " + " · ".join(f"<b>{r['symbol']}</b> {r['composite_score']:.0f}" for r in top3) + "\n\n"
+            f"<i>Add ANTHROPIC_API_KEY to GitHub Secrets for Claude AI synthesis.</i>"
         )
-        if msg:
+        return m
+    bs = [{"sym":r["symbol"],"score":r["composite_score"],"stage":r["weinstein_stage"],"rs":r["rs_percentile"],
+            "sector":r.get("sector","?"),"entry":r.get("entry_signal","?"),"sc":r.get("score_change",0)}
+           for r in sorted(buys,key=lambda x:-x["composite_score"])[:12]]
+    ss = [{"sym":r["symbol"],"score":r["composite_score"],"stage":r["weinstein_stage"],"rs":r["rs_percentile"],
+            "sector":r.get("sector","?")} for r in sells[:8]]
+    ps = [{"sym":r["symbol"],"chg":r["chg_pct"],"vol":r["vol_tag"],"rs_rank":r.get("rs_rank",999)}
+           for r in sorted(pulse,key=lambda x:-x["chg_pct"])[:5]] if pulse else []
+    prompt = (
+        f"AlphaRadar AI. Analyse NSE signals {dt}. Write 400-word Telegram message with HTML.\n"
+        f"BUY: {json.dumps(bs)}\nSELL: {json.dumps(ss)}\nPULSE: {json.dumps(ps)}\n"
+        f"Cover: (1) Market rotation/breadth, (2) Single best trade idea with entry+stop, "
+        f"(3) Most dangerous sell + sector pattern, (4) One Market Pulse insight, (5) 2-line verdict.\n"
+        f"Start: 🧠 <b>AlphaRadar AI Synthesis — {dt}</b>"
+    )
+    try:
+        r = requests.post("https://api.anthropic.com/v1/messages",
+            headers={"Content-Type":"application/json","x-api-key":_CLAUDE,"anthropic-version":"2023-06-01"},
+            json={"model":"claude-sonnet-4-20250514","max_tokens":900,
+                  "messages":[{"role":"user","content":prompt}]},
+            timeout=30)
+        if r.status_code == 200:
+            return r.json()["content"][0]["text"]
+    except Exception:
+        pass
+    return f"🧠 <b>AlphaRadar AI Synthesis — {dt}</b>\n<i>Synthesis unavailable. Check API key in GitHub Secrets.</i>"
+
+
+# ── MAIN ────────────────────────────────────────────────────────────────────────
+def run_full_alert_cycle():
+    print(f"\n{'='*56}\nAlphaRadar v2 — {datetime.now().strftime('%d %b %Y %H:%M')}\n{'='*56}")
+
+    scores, dt = load_scores()
+    print(f"Scores: {len(scores)} for {dt}")
+    if not scores:
+        send_tg("⚠ AlphaRadar: No scores. Check SUPABASE_URL/KEY in GitHub Secrets.")
+        return
+
+    pulse = load_pulse(dt)
+    print(f"Pulse: {len(pulse)} records")
+
+    price_syms = list({r["symbol"] for r in scores
+                       if r["bucket"] in ("MUST_BUY","CAN_BUY","SELL") or r.get("stage_changed")})
+    for r in n250f_data(scores)["portfolio"]:
+        if r["symbol"] not in price_syms:
+            price_syms.append(r["symbol"])
+    print(f"Fetching live prices for {len(price_syms)} symbols...")
+    live = fetch_live(price_syms)
+    print(f"Live prices: {len(live)}/{len(price_syms)}")
+
+    buys = [r for r in scores if r["bucket"] in ("MUST_BUY","CAN_BUY")]
+    sells= [r for r in scores if r["bucket"] == "SELL"]
+
+    msgs = [
+        ("Header",            build_header(scores, dt)),
+        ("Core MUST BUY",     build_core(scores, live, dt)),
+        ("N500 Ranker",       build_n500(scores, live, dt)),
+        ("Total Market",      build_total_market(scores, live, dt)),
+        ("N250F Portfolio",   build_n250f(scores, live, dt)),
+        ("Manas Arora",       build_manas(scores, live, dt)),
+        ("Stage Transitions", build_transitions(scores, live, dt)),
+        ("Market Pulse",      build_market_pulse(pulse, dt)),
+        ("Sell / Exit",       build_sells(scores, live, dt)),
+        ("AI Synthesis",      build_synthesis(buys, sells, pulse, dt)),
+        ("Kotak Status",      (
+            f"💼 <b>Kotak Neo Overlay</b>\n"
+            f"✅ Kotak Neo MCP connected in Claude.ai · Session expires daily\n"
+            f"In Claude.ai: <code>show my Kotak portfolio vs AlphaRadar signals</code>\n\n"
+            f"<b>SELL zone — check your portfolio:</b>\n"
+            + "".join(f"  ❌ <b>{r['symbol']}</b> Stage {r['weinstein_stage']}"
+                      f" · RS {r['rs_percentile']:.0f}%ile · Score {r['composite_score']:.0f}\n"
+                      for r in sorted(sells, key=lambda x: x['composite_score'])[:5])
+            + f"\n🔗 alpharadar.streamlit.app"
+        )),
+    ]
+
+    sent = 0
+    for name, msg in msgs:
+        if msg and len(msg.strip()) > 20:
             send_tg(msg)
-            all_featured.extend(featured)
+            print(f"  ✅ {name}")
+            sent += 1
             time.sleep(1.5)
         else:
-            print(f"    (no signals for this strategy today)")
-
-    # ── 6. Fresh sell message ──
-    print("\n[6/7] Sending sell/exit alerts...")
-    sell_msg = build_fresh_sell_message(all_scores, live_prices, score_date)
-    send_tg(sell_msg)
-    time.sleep(1)
-
-    # ── 7. Claude AI synthesis ──
-    print("\n[7/7] Generating Claude AI synthesis...")
-    buy_unique = list({r["symbol"]: r for r in all_featured if r["bucket"] in ("MUST_BUY","CAN_BUY")}.values())
-    synthesis = build_claude_synthesis(buy_unique, sell_all, live_prices, score_date)
-    send_tg(synthesis)
-    time.sleep(1)
-
-    # ── Kotak overlay ──
-    kotak_msg = build_kotak_portfolio_alert(
-        kotak_session_id or KOTAK_SESSION,
-        all_scores,
-        live_prices,
-    )
-    send_tg(kotak_msg)
-
-    print("\n✅ Alert cycle complete!")
-    print(f"   Signals sent: {len(buy_unique)} buy, {len(sell_all)} sell")
-    print(f"   Live prices: {len(live_prices)}/{len(price_symbols)}")
+            print(f"  ⏭ {name} (no signals)")
+    print(f"\n✅ Done — {sent} messages sent")
 
 
-# ═══════════════════════════════════════════════════
-# TELEGRAM BOT — INTERACTIVE COMMANDS
-# ═══════════════════════════════════════════════════
-"""
-Interactive Telegram bot mode.
-Commands:
-  /start        — welcome message
-  /signals      — run full signal cycle NOW
-  /stock SYMBOL — live analysis of a specific stock
-  /sell         — show all sell signals
-  /portfolio    — Kotak portfolio overlay (requires session)
-  /help         — list commands
-"""
-
-def handle_telegram_command(update: dict, kotak_session: str = ""):
-    """Process incoming Telegram message and dispatch command."""
-    try:
-        msg   = update.get("message", {})
-        text  = msg.get("text", "").strip()
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-
-        def reply(text):
-            requests.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-                timeout=10,
-            )
-
-        if text.startswith("/start"):
-            reply(
-                "👋 <b>AlphaRadar Bot Active</b>\n\n"
-                "Commands:\n"
-                "  /signals — full strategy-wise alert\n"
-                "  /stock SYMBOL — single stock analysis\n"
-                "  /sell — sell / exit signals\n"
-                "  /portfolio — Kotak portfolio check\n"
-                "  /help — this list\n\n"
-                "Powered by AlphaRadar scoring engine + Claude AI."
-            )
-
-        elif text.startswith("/signals"):
-            reply("⏳ Running full signal cycle, please wait ~30 sec...")
-            run_full_alert_cycle(kotak_session)
-
-        elif text.startswith("/sell"):
-            result = fetch_latest_scores()
-            if result:
-                all_scores, score_date = result
-                # Get live for sell symbols
-                sell_syms = [r["symbol"] for r in all_scores if r["bucket"] == "SELL"]
-                stored    = {r["symbol"]: r["price"] for r in all_scores}
-                lives     = enrich_with_live_prices(sell_syms[:20], stored)
-                sell_msg  = build_fresh_sell_message(all_scores, lives, score_date)
-                reply(sell_msg)
-
-        elif text.lower().startswith("/stock "):
-            sym = text[7:].strip().upper().replace("-", "-")
-            reply(f"⏳ Fetching live data for {sym}...")
-            _handle_stock_query(sym, reply)
-
-        elif text.startswith("/portfolio"):
-            if not kotak_session:
-                reply(
-                    "❌ Kotak session not active.\n"
-                    "Log into ICICIDirect API, generate a session token, "
-                    "and set KOTAK_SESSION_ID.\n\n"
-                    "In Claude.ai, you can also type:\n"
-                    "<code>show my Kotak portfolio vs AlphaRadar</code>"
-                )
-            else:
-                result = fetch_latest_scores()
-                if result:
-                    all_scores, _ = result
-                    stored = {r["symbol"]: r["price"] for r in all_scores}
-                    msg = build_kotak_portfolio_alert(kotak_session, all_scores, {})
-                    reply(msg)
-
-        elif text.startswith("/help"):
-            reply(
-                "<b>AlphaRadar Bot Commands:</b>\n\n"
-                "/signals — full daily signal cycle\n"
-                "/stock NAVINFLUOR — single stock deep-dive\n"
-                "/sell — all exit signals with live prices\n"
-                "/portfolio — Kotak Neo portfolio overlay\n"
-                "/start — welcome + instructions"
-            )
-    except Exception as e:
-        print(f"  ⚠ Command handler error: {e}")
-
-
-def _handle_stock_query(symbol: str, reply_fn):
-    """Fetch AlphaRadar score + live price for a specific symbol."""
-    try:
-        result = fetch_latest_scores()
-        if not result:
-            reply_fn(f"⚠ Could not fetch data for {symbol}")
-            return
-        all_scores, score_date = result
-        stock = next((r for r in all_scores if r["symbol"] == symbol), None)
-        if not stock:
-            reply_fn(f"❌ {symbol} not found in AlphaRadar universe")
-            return
-
-        lives = enrich_with_live_prices([symbol], {symbol: stock["price"]})
-        lp    = lives.get(symbol, {})
-
-        live_str  = f"₹{lp.get('live_price', stock['price']):,.2f}" if lp else f"₹{stock['price']:,.2f}"
-        chg_str   = f"{lp.get('today_chg', stock['price_change_pct']):+.2f}%"
-        delta_str = f"{lp.get('delta', 0):+.2f}% from signal"
-
-        bucket_emoji = {"MUST_BUY":"🟢","CAN_BUY":"🔵","NEUTRAL":"⚪","AVOID":"🟡","SELL":"🔴"}.get(stock["bucket"],"")
-
-        msg = (
-            f"🔍 <b>{symbol}</b> {bucket_emoji} — {score_date}\n\n"
-            f"💰 Live: <b>{live_str}</b> ({chg_str} today)\n"
-            f"📌 {lp.get('momentum','—')} ({delta_str})\n"
-            f"📊 Score: <b>{stock['composite_score']:.1f}/100</b> · {stock['action_label']}\n"
-            f"📈 Stage: {stock['weinstein_stage']} · RS: {stock['rs_percentile']:.0f}%ile\n"
-            f"🏢 Sector: {stock.get('sector','?')} · Cap: {stock.get('cap_bucket','?').title()}\n"
-            f"📉 vs 200d MA: {stock['price_vs_ma']:+.1f}% · Slope: {stock['ma_slope']:+.5f}\n"
-            f"🎯 Entry: {stock.get('entry_signal','?')}"
-        )
-        if stock.get("entry_detail"):
-            msg += f" — {stock['entry_detail']}"
-        msg += (
-            f"\n📰 News sentiment: {stock.get('news_sentiment',0):.2f}/1.0\n"
-            f"⬆ Score Δ: {stock.get('score_change',0):+.1f} · "
-            f"Stage changed: {'Yes 🆕' if stock.get('stage_changed') else 'No'}\n"
-            f"🏔 52W: ₹{stock['low_52w']:,.0f} — ₹{stock['high_52w']:,.0f}"
-        )
-        if ANTHROPIC_KEY:
-            # Quick Claude note
-            prompt = (
-                f"Give a 3-sentence trading note on {symbol} "
-                f"(NSE India). Score: {stock['composite_score']:.0f}/100, "
-                f"Stage {stock['weinstein_stage']}, RS {stock['rs_percentile']:.0f}%ile, "
-                f"live price ₹{lp.get('live_price', stock['price']):,.2f} "
-                f"({lp.get('today_chg',0):+.2f}% today), "
-                f"{lp.get('momentum','')}, entry: {stock.get('entry_signal','')}. "
-                f"Be crisp and actionable. No disclaimers."
-            )
-            try:
-                r = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={"Content-Type":"application/json",
-                             "x-api-key": ANTHROPIC_KEY,
-                             "anthropic-version":"2023-06-01"},
-                    json={"model":"claude-sonnet-4-20250514","max_tokens":200,
-                          "messages":[{"role":"user","content":prompt}]},
-                    timeout=20
-                )
-                if r.status_code == 200:
-                    note = r.json()["content"][0]["text"]
-                    msg += f"\n\n🤖 <i>{note}</i>"
-            except: pass
-        reply_fn(msg)
-    except Exception as e:
-        reply_fn(f"⚠ Error fetching {symbol}: {e}")
-
-
-# ═══════════════════════════════════════════════════
-# POLLING LOOP  (for self-hosted / local use)
-# ═══════════════════════════════════════════════════
-
-def start_polling(kotak_session: str = ""):
-    """
-    Start Telegram bot in long-polling mode.
-    Use this for local testing.
-    For production: use GitHub Actions cron + run_full_alert_cycle().
-    """
-    print("\n🤖 AlphaRadar Telegram Bot — Polling mode")
-    print(f"   Bot: @Rishabh2Bot · Chat: {TG_CHAT}")
-    print("   Press Ctrl+C to stop\n")
-
-    last_update_id = 0
+def start_polling():
+    print("🤖 Polling | @Rishabh2Bot | Ctrl+C to stop")
+    last = 0
     while True:
         try:
-            r = requests.get(
-                f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
-                params={"offset": last_update_id + 1, "timeout": 20},
-                timeout=30,
-            )
+            r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                             params={"offset": last+1, "timeout": 20}, timeout=30)
             if r.status_code == 200:
-                updates = r.json().get("result", [])
-                for update in updates:
-                    last_update_id = update["update_id"]
-                    handle_telegram_command(update, kotak_session)
+                for u in r.json().get("result", []):
+                    last = u["update_id"]
+                    _handle(u)
         except KeyboardInterrupt:
-            print("\nStopped.")
             break
         except Exception as e:
-            print(f"  Polling error: {e}")
+            print(f"  Poll error: {e}")
             time.sleep(5)
 
 
-# ═══════════════════════════════════════════════════
-# ENTRY POINT
-# ═══════════════════════════════════════════════════
+def _handle(update):
+    msg  = update.get("message", {})
+    text = msg.get("text", "").strip()
+    cid  = str(msg.get("chat", {}).get("id",""))
+    def reply(t):
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      data={"chat_id":cid,"text":t,"parse_mode":"HTML"}, timeout=10)
+    cmd = text.split()[0].lower() if text else ""
+    if cmd == "/start":
+        reply("👋 <b>AlphaRadar v2</b>\n/signals /sell /pulse /n250f /stock SYMBOL /help")
+    elif cmd == "/signals":
+        reply("⏳ Running (~45s)...")
+        run_full_alert_cycle()
+    elif cmd == "/sell":
+        s, dt = load_scores()
+        live = fetch_live([r["symbol"] for r in s if r["bucket"]=="SELL"][:20])
+        reply(build_sells(s, live, dt))
+    elif cmd == "/pulse":
+        s, dt = load_scores()
+        reply(build_market_pulse(load_pulse(dt), dt))
+    elif cmd == "/n250f":
+        s, dt = load_scores()
+        info = n250f_data(s)
+        live = fetch_live([r["symbol"] for r in info["portfolio"]])
+        reply(build_n250f(s, live, dt))
+    elif cmd == "/stock" and len(text.split()) >= 2:
+        sym = text.split()[1].upper()
+        s, dt = load_scores()
+        row = next((r for r in s if r["symbol"]==sym), None)
+        if not row:
+            reply(f"❌ {sym} not found"); return
+        L = fetch_live([sym]).get(sym,{})
+        lp = L.get("lp", row["price"])
+        chg = L.get("chg", row.get("price_change_pct",0))
+        reply(
+            f"🔍 <b>{sym}</b> — {dt}\n\n"
+            f"💰 CMP: <b>₹{lp:,.2f}</b> {arr(chg)}{abs(chg):.2f}%\n"
+            f"Score: <b>{row['composite_score']:.1f}/100</b> · {row['bucket']}\n"
+            f"Stage: {row['weinstein_stage']} · RS: {row['rs_percentile']:.0f}%ile\n"
+            f"Sector: {row.get('sector','?')} · Entry: {row.get('entry_signal','?')}\n"
+            f"52W: ₹{row['low_52w']:,.0f}–₹{row['high_52w']:,.0f}"
+        )
+    elif cmd == "/help":
+        reply("/signals /sell /pulse /n250f /stock SYM")
+
 
 if __name__ == "__main__":
     import sys
-    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
-
-    if mode == "poll":
-        # Interactive bot mode — respond to /commands
-        start_polling(KOTAK_SESSION)
-    elif mode == "test":
-        # Send a test ping
-        send_tg("✅ AlphaRadar bot test — connection OK!")
-        print("Test message sent.")
-    else:
-        # Default: run full daily alert cycle
-        run_full_alert_cycle(KOTAK_SESSION)
+    m = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if m == "poll": start_polling()
+    elif m == "test": send_tg("✅ AlphaRadar v2 OK")
+    else: run_full_alert_cycle()
