@@ -755,5 +755,153 @@ if __name__ == "__main__":
     import sys
     m = sys.argv[1] if len(sys.argv) > 1 else "run"
     if m == "poll": start_polling()
-    elif m == "test": send_tg("✅ AlphaRadar v2 OK")
+    elif m == "test": send_tg("✅ AlphaRadar v2 OK — " + datetime.now().strftime("%d %b %H:%M IST"))
+    elif m == "n250f_check": run_n250f_rebalance_check()
     else: run_full_alert_cycle()
+
+
+# ═══════════════════════════════════════════════════════════════
+# N250F REBALANCE CHECK — called daily after scoring
+# ═══════════════════════════════════════════════════════════════
+def run_n250f_rebalance_check():
+    """
+    Called every evening after scoring.
+    Checks if today is within 2 days of next rebalance date.
+    If so, sends a detailed rebalance alert with entries/exits.
+    """
+    from datetime import datetime, timedelta
+    base = datetime(2026, 5, 19)
+    today = datetime.now()
+    days  = max(0, (today - base).days)
+    elapsed = days // 14
+    last_r  = base + timedelta(days=elapsed * 14)
+    next_r  = last_r + timedelta(days=14)
+    while next_r.weekday() >= 5:
+        next_r += timedelta(days=1)
+    days_left = (next_r - today).days
+
+    # Only send alert when rebalance is 0, 1, or 2 days away
+    if days_left > 2:
+        print(f"  N250F: Next rebal {next_r.strftime('%d %b')} in {days_left} days — no alert needed")
+        return
+
+    print(f"  N250F: REBALANCE {'TODAY' if days_left <= 0 else f'IN {days_left} DAYS'} — sending alert")
+
+    scores, dt = load_scores()
+    if not scores:
+        return
+
+    info = n250f_data(scores)
+    port = info["portfolio"]
+    live = fetch_live([r["symbol"] for r in port])
+
+    urgency = "🔴 TODAY" if days_left <= 0 else ("🟡 TOMORROW" if days_left == 1 else "🟡 IN 2 DAYS")
+    now = datetime.now().strftime("%d %b %Y, %H:%M IST")
+
+    m = (
+        f"🔄 <b>N250F REBALANCE ALERT — {urgency}</b>
+"
+        f"<i>Action required on {next_r.strftime('%d %b %Y')} at 9:15 AM IST</i>
+"
+        f"<code>{now}</code>
+
+"
+        f"<b>Strategy reminder:</b> Rank all Nifty 250 stocks by 63-day return. "
+        f"Hold top 20 at 5% equal weight (₹50,000 per stock on ₹10L). "
+        f"Sell exits first, then buy entries at market open.
+
+"
+    )
+
+    # Current portfolio P&L
+    winners, losers = [], []
+    for r in port:
+        sym = r["symbol"]
+        ep  = r["price"]
+        L   = live.get(sym, {})
+        cmp = L.get("lp", ep)
+        ret = (cmp - ep) / ep * 100 if ep > 0 else 0
+        (winners if ret >= 0 else losers).append((sym, cmp, ret))
+
+    total_cap = len(port) * 50000
+    total_curr = sum(r["price"] * live.get(r["symbol"], {}).get("lp", r["price"]) / r["price"] * 50000 / r["price"]
+                     for r in port if r["price"] > 0)
+
+    m += f"📊 <b>Current portfolio status:</b>
+"
+    m += f"  ✅ {len(winners)} winning · ❌ {len(losers)} losing
+
+"
+
+    # Exits (bottom RS or below entry)
+    current_syms = {r["symbol"] for r in port}
+    likely_exits = sorted(
+        [r for r in port if r.get("rs_percentile", 50) < 65],
+        key=lambda x: x.get("rs_percentile", 50)
+    )[:5]
+
+    # Entries (high RS not currently held)
+    likely_entries = sorted(
+        [s for s in scores
+         if s.get("cap_bucket") in ("mid", "small")
+         and s.get("rs_percentile", 0) >= 82
+         and s.get("weinstein_stage") in ("2A", "2B")
+         and s["symbol"] not in current_syms],
+        key=lambda x: -x.get("rs_percentile", 0)
+    )[:5]
+
+    m += f"🔴 <b>SELL these (RS fading / below momentum threshold):</b>
+"
+    if likely_exits:
+        for r in likely_exits:
+            sym = r["symbol"]
+            L   = live.get(sym, {})
+            lp  = L.get("lp", r["price"])
+            chg = L.get("chg", 0)
+            ret = (lp - r["price"]) / r["price"] * 100 if r["price"] > 0 else 0
+            m += (f"  ❌ <b>{sym}</b> ₹{lp:,.2f} ({'+' if chg>=0 else ''}{chg:.2f}% today) · "
+                  f"RS {r.get('rs_percentile', 50):.0f}%ile · P&L {'+' if ret>=0 else ''}{ret:.1f}%
+")
+    else:
+        m += "  <i>No clear exits — all holdings still in momentum</i>
+"
+
+    m += f"
+🟢 <b>BUY these (entering top-20 by 3M momentum):</b>
+"
+    if likely_entries:
+        for r in likely_entries:
+            sym = r["symbol"]
+            L   = live.get(sym, {})
+            lp  = L.get("lp", r["price"])
+            chg = L.get("chg", 0)
+            m += (f"  ✅ <b>{sym}</b> ₹{lp:,.2f} ({'+' if chg>=0 else ''}{chg:.2f}% today) · "
+                  f"RS {r.get('rs_percentile', 50):.0f}%ile · {r.get('sector', '?')}
+")
+    else:
+        m += "  <i>No new entries — current holdings are still top-20</i>
+"
+
+    alloc = 1000000 / 20
+    m += (f"
+<b>Execution guide for {next_r.strftime('%d %b %Y')}:</b>
+"
+          f"  1. 9:00 AM: Log into broker
+"
+          f"  2. 9:15 AM: Place SELL orders first (free up capital)
+"
+          f"  3. 9:15 AM: Place BUY orders at market price
+"
+          f"  4. Target ₹{alloc:,.0f} per new position (5% weight)
+"
+          f"  5. Use CNC (delivery), not MIS
+
+"
+          f"<i>⚠ Run final rankings on {next_r.strftime('%d %b %Y')} morning for definitive list. "
+          f"Rankings above are based on {dt} EOD data.</i>
+
+"
+          f"🔗 alpharadar.streamlit.app → N250F tab → Live Tracker")
+
+    send_tg(m)
+    print(f"  ✅ N250F rebalance alert sent")
