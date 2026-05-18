@@ -1,30 +1,72 @@
-name: AlphaRadar Daily Score
+name: AlphaRadar Daily Score + Alerts
 
 on:
   schedule:
-    # 4:45 PM IST = 11:15 UTC (post market close + buffer)
-    - cron: '15 11 * * 1-5'
-  workflow_dispatch:  # Manual trigger from GitHub UI
+    # Primary: 4:45 PM IST = 11:15 UTC (right after NSE close + data buffer)
+    - cron: "15 11 * * 1-5"
+    # Failsafe: 5:15 PM IST = 11:45 UTC (fires only if primary was skipped)
+    - cron: "45 11 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      skip_scoring:
+        description: "Skip scoring, run alerts only (true/false)"
+        required: false
+        default: "false"
+
+# Prevent double-run if both crons fire close together
+concurrency:
+  group: alpharadar-daily
+  cancel-in-progress: true
 
 jobs:
-  score:
+  score-and-alert:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: "3.11"
+          cache: pip
+
       - name: Install dependencies
-        run: pip install yfinance pandas numpy scipy requests
-      
+        run: |
+          pip install yfinance==0.2.51 pandas numpy scipy requests --quiet
+
       - name: Run daily scoring
+        if: ${{ github.event.inputs.skip_scoring != 'true' }}
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daily_cron.py
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "Starting scoring at $(date -u)"
+          python daily_cron.py
+          echo "Scoring complete at $(date -u)"
+
+      - name: Send strategy Telegram alerts
+        env:
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "Sending alerts at $(date -u)"
+          python alpharadar_telegram_bot.py run
+          echo "Alerts sent at $(date -u)"
+
+      - name: N250F rebalance check
+        env:
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python alpharadar_telegram_bot.py n250f_check
