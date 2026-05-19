@@ -131,7 +131,7 @@ if df.empty:
     st.error("No scores in database.")
     st.info("""
     **To get started:** Go to **⚡ Run Scoring** in the sidebar → click **🚀 Initial Load**.
-    Takes ~15 minutes. After that, daily updates run automatically at 4:45 PM IST.
+    Takes ~15 minutes. After that, daily updates run automatically via GitHub Actions after market close (typically 5–8 PM IST).
     """)
     st.warning("⚠️ **Universe:** This tab covers all ~750 Nifty Total Market stocks scored by the daily cron.")
     st.stop()
@@ -142,7 +142,7 @@ with c1:
     st.markdown("## ◎ Nifty Total Market — Scoring Dashboard")
     st.caption("Weinstein Stage Analysis · O'Neil Relative Strength · Minervini Trend Template")
     st.caption(
-        "ℹ️ **Score** (Stage/RS/VP/Fundamentals) = EOD calculation, updated daily 4:45 PM. "
+        "ℹ️ **Score** (Stage/RS/VP/Fundamentals) = EOD calculation, auto-updated after market close. "
         "**CMP + Today's Change** = Live via Breeze (click Refresh ↑). "
         "Run Scoring page re-runs the full engine manually."
     )
@@ -374,4 +374,4 @@ with c2:
         fig.update_layout(height=280, margin=dict(l=20,r=20,t=10,b=10), plot_bgcolor="white")
         st.plotly_chart(fig, use_container_width=True)
 
-st.caption(f"AlphaRadar · Score date: {score_date} · Auto-updates daily 4:45 PM IST")
+st.caption(f"AlphaRadar · Score date: {score_date} · Auto-updated after market close via GitHub Actions")
