@@ -628,8 +628,8 @@ with live_tab:
 
     st.info("""
     ⏰ **When to act on the rebalance date:**
-    - **Signals available:** Evening of the day BEFORE the rebalance date (e.g., May 18 evening for May 19 rebalance)
-    - **When to execute:** At market OPEN (9:15 AM IST) on the rebalance date (May 19)
+    - **Signals available:** Evening of the day BEFORE the rebalance date (signals update automatically after market close)
+    - **When to execute:** At market OPEN (9:15 AM IST) on the rebalance date shown above
     - **How signals are generated:** yfinance fetches previous close prices → ranks Nifty 250 by 63-day return → top 20 = buy list
     - **The "Likely changes" section below** shows the pre-computed entry/exit list for the NEXT rebalance date
     """)
@@ -813,8 +813,8 @@ with live_tab:
 
     st.divider()
 
-    # ── LIVE PORTFOLIO TRACKER (Starting May 19, 2026) ───────────────────────
-    st.subheader("📒 My Live Portfolio Tracker — Starting May 19, 2026")
+    # ── LIVE PORTFOLIO TRACKER ───────────────────────────────────────────────
+    st.subheader("📒 My Live Portfolio Tracker")
     st.caption("Personal record of your actual N250F trades. Add entry prices manually after execution.")
 
     import json
@@ -843,11 +843,11 @@ with live_tab:
         if cap_input != tracker['start_capital']:
             tracker['start_capital'] = cap_input
 
-    # ── The May 19 stocks
+    # ── Next rebalance stocks (computed dynamically)
     may19_stocks = [e for e in pot_entries] if pot_entries else []
 
     st.info(f"""
-    **May 19 Rebalance — Action Required:**
+    **Next Rebalance — Action Required:**
     - 🟢 **BUY** (new entries): {', '.join(may19_stocks) if may19_stocks else 'See "Likely changes" above'}
     - 🔴 **SELL** (exits): {', '.join(pot_exits) if pot_exits else 'See above'}
     - **Capital per stock:** ₹{tracker['start_capital'] / 20:,.0f} (5% each of ₹{tracker['start_capital']:,})
@@ -859,7 +859,7 @@ with live_tab:
         with tc1:
             new_ticker = st.text_input("Ticker", placeholder="e.g. NEULANDLAB", key="lv_ticker").upper()
         with tc2:
-            new_date = st.text_input("Execution date", value="2026-05-19", key="lv_date")
+            new_date = st.text_input("Execution date", value=datetime.today().strftime("%Y-%m-%d"), key="lv_date")
         with tc3:
             new_price = st.number_input("Execution price (₹)", min_value=0.01, value=100.0, step=0.05, key="lv_price")
 
@@ -929,7 +929,7 @@ with live_tab:
             st.session_state[TRACKER_KEY]['positions'] = []
             st.rerun()
     else:
-        st.info("No positions recorded yet. Add your May 19 executions above after buying.")
+        st.info("No positions recorded yet. Add your executions above after buying.")
 
 # ── DISCLAIMER ────────────────────────────────────────────────────────────────
 st.markdown("""
