@@ -799,18 +799,12 @@ def run_n250f_rebalance_check():
     now = datetime.now().strftime("%d %b %Y, %H:%M IST")
 
     m = (
-        f"🔄 <b>N250F REBALANCE ALERT — {urgency}</b>
-"
-        f"<i>Action required on {next_r.strftime('%d %b %Y')} at 9:15 AM IST</i>
-"
-        f"<code>{now}</code>
-
-"
+        f"🔄 <b>N250F REBALANCE ALERT — {urgency}</b>\n"
+        f"<i>Action required on {next_r.strftime('%d %b %Y')} at 9:15 AM IST</i>\n"
+        f"<code>{now}</code>\n\n"
         f"<b>Strategy reminder:</b> Rank all Nifty 250 stocks by 63-day return. "
         f"Hold top 20 at 5% equal weight (₹50,000 per stock on ₹10L). "
-        f"Sell exits first, then buy entries at market open.
-
-"
+        f"Sell exits first, then buy entries at market open.\n\n"
     )
 
     # Current portfolio P&L
@@ -827,11 +821,8 @@ def run_n250f_rebalance_check():
     total_curr = sum(r["price"] * live.get(r["symbol"], {}).get("lp", r["price"]) / r["price"] * 50000 / r["price"]
                      for r in port if r["price"] > 0)
 
-    m += f"📊 <b>Current portfolio status:</b>
-"
-    m += f"  ✅ {len(winners)} winning · ❌ {len(losers)} losing
-
-"
+    m += f"📊 <b>Current portfolio status:</b>\n"
+    m += f"  ✅ {len(winners)} winning · ❌ {len(losers)} losing\n\n"
 
     # Exits (bottom RS or below entry)
     current_syms = {r["symbol"] for r in port}
@@ -850,8 +841,7 @@ def run_n250f_rebalance_check():
         key=lambda x: -x.get("rs_percentile", 0)
     )[:5]
 
-    m += f"🔴 <b>SELL these (RS fading / below momentum threshold):</b>
-"
+    m += f"🔴 <b>SELL these (RS fading / below momentum threshold):</b>\n"
     if likely_exits:
         for r in likely_exits:
             sym = r["symbol"]
@@ -860,15 +850,11 @@ def run_n250f_rebalance_check():
             chg = L.get("chg", 0)
             ret = (lp - r["price"]) / r["price"] * 100 if r["price"] > 0 else 0
             m += (f"  ❌ <b>{sym}</b> ₹{lp:,.2f} ({'+' if chg>=0 else ''}{chg:.2f}% today) · "
-                  f"RS {r.get('rs_percentile', 50):.0f}%ile · P&L {'+' if ret>=0 else ''}{ret:.1f}%
-")
+                  f"RS {r.get('rs_percentile', 50):.0f}%ile · P&L {'+' if ret>=0 else ''}{ret:.1f}%\n")
     else:
-        m += "  <i>No clear exits — all holdings still in momentum</i>
-"
+        m += "  <i>No clear exits — all holdings still in momentum</i>\n"
 
-    m += f"
-🟢 <b>BUY these (entering top-20 by 3M momentum):</b>
-"
+    m += f"\n🟢 <b>BUY these (entering top-20 by 3M momentum):</b>"
     if likely_entries:
         for r in likely_entries:
             sym = r["symbol"]
@@ -876,31 +862,19 @@ def run_n250f_rebalance_check():
             lp  = L.get("lp", r["price"])
             chg = L.get("chg", 0)
             m += (f"  ✅ <b>{sym}</b> ₹{lp:,.2f} ({'+' if chg>=0 else ''}{chg:.2f}% today) · "
-                  f"RS {r.get('rs_percentile', 50):.0f}%ile · {r.get('sector', '?')}
-")
+                  f"RS {r.get('rs_percentile', 50):.0f}%ile · {r.get('sector', '?')}\n")
     else:
-        m += "  <i>No new entries — current holdings are still top-20</i>
-"
+        m += "  <i>No new entries — current holdings are still top-20</i>\n"
 
     alloc = 1000000 / 20
-    m += (f"
-<b>Execution guide for {next_r.strftime('%d %b %Y')}:</b>
-"
-          f"  1. 9:00 AM: Log into broker
-"
-          f"  2. 9:15 AM: Place SELL orders first (free up capital)
-"
-          f"  3. 9:15 AM: Place BUY orders at market price
-"
-          f"  4. Target ₹{alloc:,.0f} per new position (5% weight)
-"
-          f"  5. Use CNC (delivery), not MIS
-
-"
+    m += (f"\n<b>Execution guide for {next_r.strftime('%d %b %Y')}:</b>\n"
+          f"  1. 9:00 AM: Log into broker\n"
+          f"  2. 9:15 AM: Place SELL orders first (free up capital)\n"
+          f"  3. 9:15 AM: Place BUY orders at market price\n"
+          f"  4. Target ₹{alloc:,.0f} per new position (5% weight)\n"
+          f"  5. Use CNC (delivery), not MIS\n\n"
           f"<i>⚠ Run final rankings on {next_r.strftime('%d %b %Y')} morning for definitive list. "
-          f"Rankings above are based on {dt} EOD data.</i>
-
-"
+          f"Rankings above are based on {dt} EOD data.</i>\n\n"
           f"🔗 alpharadar.streamlit.app → N250F tab → Live Tracker")
 
     send_tg(m)
