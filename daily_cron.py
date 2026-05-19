@@ -241,29 +241,74 @@ def load_universe():
     return list(stocks.values())
 
 # ── DATA DOWNLOAD ──
-def download_batch(symbols, period, interval, batch_size=50):
+def download_single(ticker, period, interval, retries=3):
+    """Download single ticker with retry + backoff. Returns dict of OHLCV or None."""
+    import random
+    for attempt in range(retries):
+        try:
+            data = yf.download(ticker, period=period, interval=interval,
+                               progress=False, threads=False, timeout=20)
+            if not data.empty:
+                c = data['Close'].squeeze().dropna()
+                if len(c) >= 20:
+                    return {k: data[k].squeeze().dropna() for k in ['Close', 'Volume', 'High', 'Low']}
+            return None
+        except Exception as e:
+            err = str(e)
+            if 'Expecting value' in err or 'JSONDecodeError' in err or 'rate' in err.lower():
+                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+                time.sleep(wait)
+            else:
+                time.sleep(0.5)
+    return None
+
+
+def download_batch(symbols, period, interval, batch_size=10):
+    """Download with small batches + per-ticker fallback on failure."""
+    import random
     all_data = {}
     tickers = [f"{s}.NS" for s in symbols]
+
     for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i+batch_size]
+        batch = tickers[i:i + batch_size]
+        batch_syms = [t.replace('.NS', '') for t in batch]
+
+        # Try batch first
         try:
-            data = yf.download(batch, period=period, interval=interval, progress=False, threads=True)
-            if not data.empty:
+            data = yf.download(batch, period=period, interval=interval,
+                               progress=False, threads=False, timeout=30)
+            if not data.empty and 'Close' in data.columns:
                 if len(batch) == 1:
-                    sym = batch[0].replace('.NS', '')
+                    sym = batch_syms[0]
                     c = data['Close'].squeeze().dropna()
                     if len(c) >= 20:
-                        all_data[sym] = {k: data[k].squeeze().dropna() for k in ['Close','Volume','High','Low']}
+                        all_data[sym] = {k: data[k].squeeze().dropna()
+                                         for k in ['Close', 'Volume', 'High', 'Low']}
                 else:
-                    for t in batch:
-                        sym = t.replace('.NS', '')
+                    for t, sym in zip(batch, batch_syms):
                         try:
                             c = data['Close'][t].dropna()
                             if len(c) >= 20:
-                                all_data[sym] = {k: data[k][t].dropna() for k in ['Close','Volume','High','Low']}
-                        except: pass
-            time.sleep(0.3)
-        except: pass
+                                all_data[sym] = {k: data[k][t].dropna()
+                                                 for k in ['Close', 'Volume', 'High', 'Low']}
+                        except Exception:
+                            pass
+                # Successful batch — short sleep
+                time.sleep(random.uniform(1.0, 2.5))
+                continue
+        except Exception as e:
+            err = str(e)
+            if 'Expecting value' in err or 'JSONDecodeError' in err:
+                # Yahoo rate-limited — fall back to individual downloads
+                pass
+
+        # Fallback: individual ticker downloads with backoff
+        for t, sym in zip(batch, batch_syms):
+            result = download_single(t, period, interval)
+            if result:
+                all_data[sym] = result
+            time.sleep(random.uniform(0.8, 2.0))
+
     return all_data
 
 # ── MAIN ──
