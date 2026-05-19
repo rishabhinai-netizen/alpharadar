@@ -359,7 +359,7 @@ if scores_df is None or scores_df.empty:
     If you're seeing this during market hours, scores from yesterday should be available.
     
     **Manual fix:** Go to **⚡ Run Scoring** tab → click **🚀 Initial Load** (takes ~15 min).
-    After that, the GitHub Actions cron keeps scores updated daily at 4:45 PM IST.
+    After that, the GitHub Actions cron keeps scores updated automatically after market close (typically 5–8 PM IST).
     """)
     st.warning("⚠️ **Universe coverage:** N500 Ranker scores up to 800 stocks from ar_daily_scores. The Manas Arora scanner covers only ~200 stocks due to Breeze API rate limits.")
     st.stop()
